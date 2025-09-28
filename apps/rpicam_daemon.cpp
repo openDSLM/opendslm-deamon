@@ -26,10 +26,47 @@ void signalHandler(int)
         keep_running = false;
 }
 
+constexpr const char *kDefaultShmSocket = "/tmp/opendslm-preview.sock";
+
+std::string gstQuote(const std::string &value)
+{
+        std::string quoted;
+        quoted.reserve(value.size() + 2);
+        quoted.push_back('"');
+        for (char c : value)
+        {
+                if (c == '\\' || c == '"')
+                        quoted.push_back('\\');
+                quoted.push_back(c);
+        }
+        quoted.push_back('"');
+        return quoted;
+}
+
+std::string buildShmPreviewPipeline(const std::string &socket_path)
+{
+        std::string quoted = gstQuote(socket_path);
+        return "queue max-size-buffers=2 leaky=downstream ! videoconvert ! video/x-raw,format=RGBA ! shmsink "
+               "wait-for-connection=false sync=false socket-path="
+               + quoted;
+}
+
+std::string buildShmClientPipeline(const std::string &socket_path)
+{
+        std::string quoted = gstQuote(socket_path);
+        return "shmsrc socket-path=" + quoted
+               + " is-live=true do-timestamp=true ! queue max-size-buffers=2 leaky=downstream ! "
+                 "video/x-raw,format=RGBA ! gtk4paintablesink";
+}
+
 struct CommandLineOptions
 {
         uint16_t port = 8400;
         std::string preview_pipeline;
+        std::string preview_client_pipeline;
+        std::string shm_socket = kDefaultShmSocket;
+        bool preview_enabled = true;
+        bool preview_pipeline_explicit = false;
 };
 
 CommandLineOptions parseCommandLine(int argc, char *argv[])
@@ -45,27 +82,103 @@ CommandLineOptions parseCommandLine(int argc, char *argv[])
                                 throw std::runtime_error("Port must be between 1 and 65535");
                         options.port = static_cast<uint16_t>(value);
                 }
+                else if (arg.rfind("--preview-gstreamer-client=", 0) == 0)
+                {
+                        options.preview_client_pipeline = arg.substr(std::strlen("--preview-gstreamer-client="));
+                }
+                else if (arg == "--preview-gstreamer-client")
+                {
+                        if (i + 1 >= argc)
+                                throw std::runtime_error("--preview-gstreamer-client expects a pipeline description");
+                        options.preview_client_pipeline = argv[++i];
+                }
+                else if (arg.rfind("--preview-gstreamer-socket=", 0) == 0)
+                {
+                        options.shm_socket = arg.substr(std::strlen("--preview-gstreamer-socket="));
+                        if (options.shm_socket.empty())
+                                throw std::runtime_error("--preview-gstreamer-socket requires a non-empty path");
+                }
+                else if (arg == "--preview-gstreamer-socket")
+                {
+                        if (i + 1 >= argc)
+                                throw std::runtime_error("--preview-gstreamer-socket expects a socket path");
+                        options.shm_socket = argv[++i];
+                        if (options.shm_socket.empty())
+                                throw std::runtime_error("--preview-gstreamer-socket requires a non-empty path");
+                }
                 else if (arg.rfind("--preview-gstreamer=", 0) == 0)
                 {
                         options.preview_pipeline = arg.substr(std::strlen("--preview-gstreamer="));
-                        if (options.preview_pipeline.empty())
+                        if (options.preview_pipeline == "none" || options.preview_pipeline == "off")
+                        {
+                                options.preview_enabled = false;
+                                options.preview_pipeline.clear();
+                        }
+                        else if (options.preview_pipeline.empty())
                                 throw std::runtime_error("--preview-gstreamer requires a non-empty pipeline");
+                        options.preview_pipeline_explicit = true;
                 }
                 else if (arg == "--preview-gstreamer")
                 {
                         if (i + 1 >= argc)
                                 throw std::runtime_error("--preview-gstreamer expects a pipeline description");
                         options.preview_pipeline = argv[++i];
+                        if (options.preview_pipeline == "none" || options.preview_pipeline == "off")
+                        {
+                                options.preview_enabled = false;
+                                options.preview_pipeline.clear();
+                        }
+                        else if (options.preview_pipeline.empty())
+                                throw std::runtime_error("--preview-gstreamer requires a non-empty pipeline");
+                        options.preview_pipeline_explicit = true;
+                }
+                else if (arg == "--no-preview-gstreamer")
+                {
+                        options.preview_enabled = false;
+                        options.preview_pipeline.clear();
+                        options.preview_pipeline_explicit = true;
                 }
                 else if (arg == "--help" || arg == "-h")
                 {
-                        std::cout << "Usage: rpicam-daemon [--port <port>] [--preview-gstreamer <pipeline>]\n";
-                        std::cout << "       pipeline describes the downstream elements for an appsrc named rpicam_src." << std::endl;
+                        std::cout << "Usage: rpicam-daemon [--port <port>] [preview options]\n";
+                        std::cout << "Preview options:\n";
+                        std::cout << "  --preview-gstreamer <pipeline>        Use a custom GStreamer pipeline (downstream of appsrc).\n";
+                        std::cout << "  --preview-gstreamer=none|off          Disable the GStreamer preview backend.\n";
+                        std::cout << "  --preview-gstreamer-client <pipeline> Advertise a client-side pipeline in /status.\n";
+                        std::cout << "  --preview-gstreamer-socket <path>     Change the shared-memory socket path (default: "
+                                  << kDefaultShmSocket << ").\n";
+                        std::cout << "  --no-preview-gstreamer                Disable the GStreamer preview backend." << std::endl;
+                        std::cout << "When no custom pipeline is supplied the daemon publishes preview frames through shmsink\n"
+                                     "and advertises a matching shmsrc client pipeline." << std::endl;
                         std::exit(0);
                 }
                 else
                         throw std::runtime_error("Unknown argument: " + arg);
         }
+
+        if (!options.preview_pipeline_explicit)
+        {
+                if (options.preview_enabled)
+                {
+                        options.preview_pipeline = buildShmPreviewPipeline(options.shm_socket);
+                        if (options.preview_client_pipeline.empty())
+                                options.preview_client_pipeline = buildShmClientPipeline(options.shm_socket);
+                }
+                else
+                {
+                        options.preview_pipeline.clear();
+                        options.preview_client_pipeline.clear();
+                }
+        }
+        else
+        {
+                if (!options.preview_enabled)
+                        options.preview_client_pipeline.clear();
+                else if (options.preview_client_pipeline.empty()
+                         && options.preview_pipeline.find("shmsink") != std::string::npos)
+                        options.preview_client_pipeline = buildShmClientPipeline(options.shm_socket);
+        }
+
         return options;
 }
 
@@ -84,6 +197,7 @@ int main(int argc, char *argv[])
 
                 rpicam::CameraDaemon daemon;
                 daemon.setPreviewPipeline(cli.preview_pipeline);
+                daemon.setPreviewClientPipeline(cli.preview_client_pipeline);
                 daemon.start(cli.port);
 
                 std::signal(SIGINT, signalHandler);
@@ -92,6 +206,8 @@ int main(int argc, char *argv[])
                 std::cout << "rpicam-daemon listening on port " << cli.port << std::endl;
                 if (!cli.preview_pipeline.empty())
                         std::cout << "Preview pipeline: " << cli.preview_pipeline << std::endl;
+                if (!cli.preview_client_pipeline.empty())
+                        std::cout << "Client preview pipeline: " << cli.preview_client_pipeline << std::endl;
                 std::cout << "Press Ctrl+C to stop." << std::endl;
 
                 while (keep_running)

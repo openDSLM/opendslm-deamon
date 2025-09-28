@@ -33,16 +33,22 @@ original copyright and SPDX headers.  The top-level `license.txt` from
 
 Build with `meson setup build -Denable_gstreamer=enabled` so the daemon links against libgstreamer and enables the preview backend.
 
-Run `rpicam-daemon` with `--preview-gstreamer` to channel the camera viewfinder into a custom GStreamer pipeline.
-The option expects the elements that should follow an `appsrc` named `rpicam_src`; the daemon creates the
-source, feeds I420 frames at the configured preview framerate, and keeps timestamps in sync for live rendering.
-
-Example (renders directly to GTK4):
+When GStreamer support is available the daemon now publishes preview frames through a shared-memory `shmsink` by default. The
+socket lives at `/tmp/opendslm-preview.sock` (configurable via `--preview-gstreamer-socket`). The matching client pipeline is
+advertised in `/status` under `preview_client_pipeline` and looks like:
 
 ```
-./build/apps/rpicam-daemon --preview-gstreamer "queue ! videoconvert ! gtk4paintablesink" --framerate 30
+shmsrc socket-path="/tmp/opendslm-preview.sock" is-live=true do-timestamp=true ! \
+  queue max-size-buffers=2 leaky=downstream ! video/x-raw,format=RGBA ! gtk4paintablesink
 ```
 
-Any pipeline that can consume planar I420 video can be used, so you can replace the sink with a shared
-`gtk4paintablesink`, `waylandsink`, network sinks, or additional processing stages before the UI.
-When the daemon is idle the pipeline pauses in READY state and resumes automatically as soon as new frames arrive.
+Replace `gtk4paintablesink` with any sink suitable for your UI. For example, use `autovideosink` for a quick local test window:
+
+```
+gst-launch-1.0 shmsrc socket-path=/tmp/opendslm-preview.sock is-live=true do-timestamp=true ! \
+  queue max-size-buffers=2 leaky=downstream ! video/x-raw,format=RGBA ! autovideosink
+```
+
+To override the internal pipeline entirely, pass `--preview-gstreamer <pipeline>`; the string still describes the elements
+downstream of the daemon-managed `appsrc` named `rpicam_src`. Use `--preview-gstreamer=none` or `--no-preview-gstreamer` to
+disable the GStreamer preview backend when not required.
