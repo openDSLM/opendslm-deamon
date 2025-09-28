@@ -140,6 +140,18 @@ std::vector<uint8_t> encodeFrameToJpeg(libcamera::Span<uint8_t> span, StreamInfo
 
 CameraDaemon::CameraDaemon() {}
 
+void CameraDaemon::setPreviewPipeline(const std::string &pipeline)
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        preview_pipeline_ = pipeline;
+}
+
+std::string CameraDaemon::previewPipeline() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return preview_pipeline_;
+}
+
 void CameraDaemon::start(uint16_t port)
 {
         registerRoutes();
@@ -357,6 +369,7 @@ std::string CameraDaemon::buildStatusJson() const
              << ",\"mode\":" << jsonString(modeToString(session_.mode))
              << ",\"last_error\":" << jsonString(session_.last_error)
              << "},\"settings\":" << buildSettingsJson(settings_)
+             << ",\"preview_pipeline\":" << jsonString(preview_pipeline_)
              << ",\"last_capture\":";
         if (last_capture_.type.empty())
                 json << "null";
@@ -419,6 +432,7 @@ CameraDaemon::CaptureResult CameraDaemon::runCineDngCapture(CameraSettings const
                 char *argv[] = { arg0 };
                 int argc = 1;
                 options->Parse(argc, argv);
+                options->preview_gstreamer = previewPipeline();
                 applySettingsToOptions(settings, *options, true);
 
                 std::string ensure_error;
@@ -536,6 +550,7 @@ bool CameraDaemon::capturePreviewSnapshot(CameraSettings const &settings, std::v
                 char *argv[] = { arg0 };
                 int argc = 1;
                 options->Parse(argc, argv);
+                options->preview_gstreamer = previewPipeline();
                 applySettingsToOptions(settings, *options, false);
                 options->quality = 85;
 
@@ -676,7 +691,11 @@ bool CameraDaemon::ensureOutputDirectory(std::string const &path, std::string &e
 void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoOptions &options, bool request_raw)
 {
         options.timeout.value = std::chrono::nanoseconds(0);
+#ifdef GSTREAMER_PRESENT
+        options.nopreview = options.preview_gstreamer.empty();
+#else
         options.nopreview = true;
+#endif
         options.preview = "0,0,0,0";
         options.preview_stream.clear();
         options.fullscreen = false;
@@ -974,6 +993,7 @@ void CameraDaemon::cameraLoop()
                         char *argv[] = { arg0 };
                         int argc = 1;
                         options->Parse(argc, argv);
+                        options->preview_gstreamer = previewPipeline();
 
                         CameraSettings settings = getSettings();
                         applySettingsToOptions(settings, *options, true /* request raw */);

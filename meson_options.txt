@@ -13,6 +13,11 @@ option('enable_egl',
         value : 'auto',
         description : 'Enable EGL preview window support')
 
+option('enable_gstreamer',
+        type : 'feature',
+        value : 'auto',
+        description : 'Enable GStreamer preview streaming support')
+
 option('enable_qt',
         type : 'feature',
         value : 'auto',

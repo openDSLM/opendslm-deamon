@@ -229,6 +229,8 @@ Options::Options()
                         "Set the preview window dimensions, given as x,y,width,height e.g. 0,0,640,480")
                 ("preview-stream", value<std::string>(&preview_stream)->default_value(""),
                         "Serve the preview as an MJPEG stream on host:port (use just a port to bind all interfaces)")
+                ("preview-gstreamer", value<std::string>(&preview_gstreamer)->default_value(""),
+                        "Push preview frames into a GStreamer pipeline. Provide the elements downstream of the built-in appsrc named rpicam_src.")
                 ("fullscreen,f", value<bool>(&fullscreen)->default_value(false)->implicit_value(true),
                         "Use a fullscreen preview window")
 		("qt-preview", value<bool>(&qt_preview)->default_value(false)->implicit_value(true),
@@ -674,6 +676,7 @@ void Options::Print() const
                 std::cerr << "    preview: " << preview_x << "," << preview_y << "," << preview_width << ","
                                            << preview_height << std::endl;
         std::cerr << "    preview-stream: " << (preview_stream.empty() ? "off" : preview_stream) << std::endl;
+        std::cerr << "    preview-gstreamer: " << (preview_gstreamer.empty() ? "off" : preview_gstreamer) << std::endl;
         std::cerr << "    qt-preview: " << qt_preview << std::endl;
 	std::cerr << "    transform: " << transformToString(transform) << std::endl;
 	if (roi_width == 0 || roi_height == 0)

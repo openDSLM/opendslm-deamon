@@ -14,11 +14,18 @@ Preview *make_egl_preview(Options const *options);
 Preview *make_drm_preview(Options const *options);
 Preview *make_qt_preview(Options const *options);
 Preview *make_jpeg_stream_preview(Options const *options);
+#if GSTREAMER_PRESENT
+Preview *make_gstreamer_preview(Options const *options);
+#endif
 
 Preview *make_preview(Options const *options)
 {
         if (!options->preview_stream.empty())
                 return make_jpeg_stream_preview(options);
+#if GSTREAMER_PRESENT
+        if (!options->preview_gstreamer.empty())
+                return make_gstreamer_preview(options);
+#endif
         if (options->nopreview)
                 return make_null_preview(options);
 #if QT_PRESENT

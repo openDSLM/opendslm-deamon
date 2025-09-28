@@ -29,6 +29,18 @@ if x11_deps.found() and epoxy_deps.found()
     enable_egl = true
 endif
 
+enable_gstreamer = false
+gstreamer_core_dep = dependency('gstreamer-1.0', required : get_option('enable_gstreamer'))
+gstreamer_app_dep = dependency('gstreamer-app-1.0', required : get_option('enable_gstreamer'))
+gstreamer_video_dep = dependency('gstreamer-video-1.0', required : get_option('enable_gstreamer'))
+
+if gstreamer_core_dep.found() and gstreamer_app_dep.found() and gstreamer_video_dep.found()
+    rpicam_app_dep += [gstreamer_core_dep, gstreamer_app_dep, gstreamer_video_dep]
+    rpicam_app_src += files('gstreamer_preview.cpp')
+    cpp_arguments += '-DGSTREAMER_PRESENT=1'
+    enable_gstreamer = true
+endif
+
 enable_qt = false
 qt_dep = dependency('qt5', modules : ['Core', 'Widgets'], required : get_option('enable_qt'))
 if qt_dep.found()

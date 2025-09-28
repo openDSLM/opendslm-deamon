@@ -122,6 +122,7 @@ struct Options
 	bool fullscreen;
         unsigned int preview_x, preview_y, preview_width, preview_height;
         std::string preview_stream;
+        std::string preview_gstreamer;
         libcamera::Transform transform;
 	std::string roi;
 	float roi_x, roi_y, roi_width, roi_height;
