@@ -67,6 +67,7 @@ struct CommandLineOptions
         std::string shm_socket = kDefaultShmSocket;
         bool preview_enabled = true;
         bool preview_pipeline_explicit = false;
+        bool preview_client_pipeline_explicit = false;
 };
 
 CommandLineOptions parseCommandLine(int argc, char *argv[])
@@ -85,12 +86,14 @@ CommandLineOptions parseCommandLine(int argc, char *argv[])
                 else if (arg.rfind("--preview-gstreamer-client=", 0) == 0)
                 {
                         options.preview_client_pipeline = arg.substr(std::strlen("--preview-gstreamer-client="));
+                        options.preview_client_pipeline_explicit = true;
                 }
                 else if (arg == "--preview-gstreamer-client")
                 {
                         if (i + 1 >= argc)
                                 throw std::runtime_error("--preview-gstreamer-client expects a pipeline description");
                         options.preview_client_pipeline = argv[++i];
+                        options.preview_client_pipeline_explicit = true;
                 }
                 else if (arg.rfind("--preview-gstreamer-socket=", 0) == 0)
                 {
@@ -197,7 +200,8 @@ int main(int argc, char *argv[])
 
                 rpicam::CameraDaemon daemon;
                 daemon.setPreviewPipeline(cli.preview_pipeline);
-                daemon.setPreviewClientPipeline(cli.preview_client_pipeline);
+                daemon.setPreviewClientPipeline(cli.preview_client_pipeline, cli.preview_client_pipeline_explicit);
+                daemon.setShmSocket(cli.shm_socket);
                 daemon.start(cli.port);
 
                 std::signal(SIGINT, signalHandler);
@@ -223,4 +227,3 @@ int main(int argc, char *argv[])
 
         return EXIT_SUCCESS;
 }
-

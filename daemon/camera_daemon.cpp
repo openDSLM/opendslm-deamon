@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <cmath>
 
 #include <jpeglib.h>
 #include <libcamera/base/span.h>
@@ -152,16 +153,35 @@ std::string CameraDaemon::previewPipeline() const
         return preview_pipeline_;
 }
 
-void CameraDaemon::setPreviewClientPipeline(const std::string &pipeline)
+void CameraDaemon::setPreviewClientPipeline(const std::string &pipeline, bool explicit_value)
 {
         std::lock_guard<std::mutex> lock(mutex_);
         preview_client_pipeline_ = pipeline;
+        preview_client_pipeline_explicit_ = explicit_value;
 }
 
 std::string CameraDaemon::previewClientPipeline() const
 {
         std::lock_guard<std::mutex> lock(mutex_);
         return preview_client_pipeline_;
+}
+
+bool CameraDaemon::previewClientPipelineExplicit() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return preview_client_pipeline_explicit_;
+}
+
+void CameraDaemon::setShmSocket(const std::string &socket)
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        shm_socket_ = socket;
+}
+
+std::string CameraDaemon::shmSocket() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return shm_socket_;
 }
 
 void CameraDaemon::start(uint16_t port)
@@ -1040,6 +1060,34 @@ void CameraDaemon::cameraLoop()
                         if (!vstream)
                                 throw std::runtime_error("Video stream unavailable for preview");
 
+                        if (!previewClientPipelineExplicit())
+                        {
+                                std::string pipeline = previewClientPipeline();
+                                if (!pipeline.empty())
+                                {
+                                        static constexpr char kCapsToken[] = "video/x-raw,format=RGBA";
+                                        std::size_t caps_idx = pipeline.find(kCapsToken);
+                                        if (caps_idx != std::string::npos
+                                            && pipeline.find("width=", caps_idx) == std::string::npos)
+                                        {
+                                                std::ostringstream caps;
+                                                caps << kCapsToken;
+                                                if (vinfo.width && vinfo.height)
+                                                        caps << ",width=" << vinfo.width << ",height=" << vinfo.height;
+                                                double fps_value = settings.fps;
+                                                if (fps_value > 0.0)
+                                                {
+                                                        long fps_scaled = std::lround(fps_value * 1000.0);
+                                                        if (fps_scaled > 0)
+                                                                caps << ",framerate=" << fps_scaled << "/1000";
+                                                }
+
+                                                pipeline.replace(caps_idx, sizeof(kCapsToken) - 1, caps.str());
+                                                setPreviewClientPipeline(pipeline, false);
+                                        }
+                                }
+                        }
+
                         StreamInfo rinfo;
                         libcamera::Stream *rstream = app.RawStream(&rinfo);
                         if (!rstream)
@@ -1087,6 +1135,9 @@ void CameraDaemon::cameraLoop()
                                         throw std::runtime_error("Unrecognised message from camera");
 
                                 CompletedRequestPtr &completed_request = std::get<CompletedRequestPtr>(msg.payload);
+
+                                // Forward the frame to the configured preview pipeline (e.g. GStreamer shmsink)
+                                app.ShowPreview(completed_request, vstream);
 
                                 // Update preview JPEG from the video stream (disabled unless preview_enabled_)
                                 if (preview_enabled_.load(std::memory_order_relaxed))

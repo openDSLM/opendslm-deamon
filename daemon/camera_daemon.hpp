@@ -65,9 +65,12 @@ public:
 
         bool updateSettings(JsonObject const &values, std::string &error_message);
         void setPreviewPipeline(const std::string &pipeline);
-        void setPreviewClientPipeline(const std::string &pipeline);
+        void setPreviewClientPipeline(const std::string &pipeline, bool explicit_value);
         std::string previewPipeline() const;
         std::string previewClientPipeline() const;
+        bool previewClientPipelineExplicit() const;
+        void setShmSocket(const std::string &socket);
+        std::string shmSocket() const;
         bool startSession(SessionMode mode, std::string &error_message);
         bool stopSession(std::string &error_message);
 
@@ -107,6 +110,8 @@ private:
         CaptureSummary last_capture_;
         std::string preview_pipeline_;
         std::string preview_client_pipeline_;
+        bool preview_client_pipeline_explicit_ = false;
+        std::string shm_socket_;
 
         // Background camera thread and control flags
         std::thread camera_thread_;
