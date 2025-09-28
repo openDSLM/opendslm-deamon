@@ -22,6 +22,11 @@ ninja -C build rpicam-daemon
 
 The process blocks and serves until a `SIGINT`/`SIGTERM` is delivered.
 
+With GStreamer enabled builds the daemon automatically streams the live preview through a shared-memory `shmsink`. Override the
+socket with `--preview-gstreamer-socket <path>`, advertise a different client pipeline with
+`--preview-gstreamer-client <pipeline>`, or disable the backend entirely via `--preview-gstreamer=none` / `--no-preview-gstreamer`.
+Supplying `--preview-gstreamer <pipeline>` replaces the internal pipeline with custom elements (downstream of `appsrc`).
+
 ## HTTP endpoints
 
 All JSON endpoints accept and return UTF-8 encoded JSON. Unless noted otherwise
@@ -46,11 +51,15 @@ Returns the current session state, settings and summary of the last capture:
     "output_dir": "/ssd/RAW",
     "mode": ""
   },
+  "preview_pipeline": "queue max-size-buffers=2 leaky=downstream ! videoconvert ! video/x-raw,format=RGBA ! shmsink wait-for-connection=false sync=false socket-path=\"/tmp/opendslm-preview.sock\"",
+  "preview_client_pipeline": "shmsrc socket-path=\"/tmp/opendslm-preview.sock\" is-live=true do-timestamp=true ! queue max-size-buffers=2 leaky=downstream ! video/x-raw,format=RGBA ! gtk4paintablesink",
   "last_capture": null
 }
 ```
 
-`last_capture` becomes a structure such as
+`preview_pipeline` describes the elements that follow the daemon-managed `appsrc` (defaulting to the shared-memory pipeline) and
+`preview_client_pipeline` provides a ready-to-use GStreamer pipeline for clients that want to render the stream (swap the sink as
+needed). `last_capture` becomes a structure such as
 
 ```json
 {

@@ -152,6 +152,18 @@ std::string CameraDaemon::previewPipeline() const
         return preview_pipeline_;
 }
 
+void CameraDaemon::setPreviewClientPipeline(const std::string &pipeline)
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        preview_client_pipeline_ = pipeline;
+}
+
+std::string CameraDaemon::previewClientPipeline() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return preview_client_pipeline_;
+}
+
 void CameraDaemon::start(uint16_t port)
 {
         registerRoutes();
@@ -370,6 +382,7 @@ std::string CameraDaemon::buildStatusJson() const
              << ",\"last_error\":" << jsonString(session_.last_error)
              << "},\"settings\":" << buildSettingsJson(settings_)
              << ",\"preview_pipeline\":" << jsonString(preview_pipeline_)
+             << ",\"preview_client_pipeline\":" << jsonString(preview_client_pipeline_)
              << ",\"last_capture\":";
         if (last_capture_.type.empty())
                 json << "null";

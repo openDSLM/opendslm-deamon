@@ -65,7 +65,9 @@ public:
 
         bool updateSettings(JsonObject const &values, std::string &error_message);
         void setPreviewPipeline(const std::string &pipeline);
+        void setPreviewClientPipeline(const std::string &pipeline);
         std::string previewPipeline() const;
+        std::string previewClientPipeline() const;
         bool startSession(SessionMode mode, std::string &error_message);
         bool stopSession(std::string &error_message);
 
@@ -104,6 +106,7 @@ private:
         SessionState session_;
         CaptureSummary last_capture_;
         std::string preview_pipeline_;
+        std::string preview_client_pipeline_;
 
         // Background camera thread and control flags
         std::thread camera_thread_;
