@@ -9,8 +9,12 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdio>
+#include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -52,6 +56,8 @@ DngOutput::DngOutput(VideoOptions const *options, StreamInfo const &info, std::s
 {
         if (options->output == "-")
                 throw std::runtime_error("CinemaDNG output does not support writing to stdout");
+
+        initialiseFrameIndex();
 }
 
 void DngOutput::MetadataReady(libcamera::ControlList &metadata)
@@ -77,16 +83,146 @@ libcamera::ControlList DngOutput::waitForMetadata()
 std::string DngOutput::nextFilename()
 {
         std::lock_guard<std::mutex> lock(file_mutex_);
-        std::array<char, 512> filename {};
-        int n = snprintf(filename.data(), filename.size(), filename_pattern_.c_str(), frame_index_);
-        if (n < 0 || n >= static_cast<int>(filename.size()))
-                throw std::runtime_error("failed to compose CinemaDNG filename");
+        std::string filename = composeFilename(frame_index_);
 
         frame_index_++;
         if (options_->wrap)
                 frame_index_ = frame_index_ % options_->wrap;
 
+        return filename;
+}
+
+std::string DngOutput::composeFilename(unsigned int index) const
+{
+        std::array<char, 512> filename {};
+        int n = snprintf(filename.data(), filename.size(), filename_pattern_.c_str(), index);
+        if (n < 0 || n >= static_cast<int>(filename.size()))
+                throw std::runtime_error("failed to compose CinemaDNG filename");
+
         return std::string(filename.data(), n);
+}
+
+void DngOutput::initialiseFrameIndex()
+{
+        std::filesystem::path sample_path(composeFilename(0));
+        std::filesystem::path directory = sample_path.has_parent_path() ? sample_path.parent_path()
+                                                                       : std::filesystem::path(".");
+
+        std::error_code ec;
+        if (!std::filesystem::exists(directory, ec) || ec)
+                return;
+        if (!std::filesystem::is_directory(directory, ec) || ec)
+                return;
+
+        std::filesystem::path pattern_path(filename_pattern_);
+        std::string file_pattern = pattern_path.filename().string();
+
+        bool parsed_pattern = false;
+        std::string prefix;
+        std::string suffix;
+        char conversion = '\0';
+
+        size_t percent = file_pattern.find('%');
+        if (percent != std::string::npos)
+        {
+                size_t conv_pos = file_pattern.find_first_of("diuoxX", percent);
+                if (conv_pos != std::string::npos)
+                {
+                        conversion = file_pattern[conv_pos];
+                        ++conv_pos;
+                        prefix = file_pattern.substr(0, percent);
+                        suffix = file_pattern.substr(conv_pos);
+                        parsed_pattern = true;
+                }
+        }
+
+        unsigned int max_index = 0;
+        bool found = false;
+
+        if (parsed_pattern)
+        {
+                int base = 10;
+                if (conversion == 'x' || conversion == 'X')
+                        base = 16;
+                else if (conversion == 'o')
+                        base = 8;
+
+                auto is_valid_digit = [base](char ch) {
+                        unsigned char uch = static_cast<unsigned char>(ch);
+                        if (base == 10)
+                                return std::isdigit(uch) != 0;
+                        if (base == 8)
+                                return ch >= '0' && ch <= '7';
+                        if (base == 16)
+                                return std::isxdigit(uch) != 0;
+                        return false;
+                };
+
+                std::filesystem::directory_iterator it(directory, ec);
+                std::filesystem::directory_iterator end;
+                for (; !ec && it != end; it.increment(ec))
+                {
+                        std::error_code file_ec;
+                        if (!it->is_regular_file(file_ec) || file_ec)
+                                continue;
+
+                        std::string candidate = it->path().filename().string();
+                        if (candidate.size() < prefix.size() + suffix.size())
+                                continue;
+                        if (candidate.compare(0, prefix.size(), prefix) != 0)
+                                continue;
+                        if (!suffix.empty() &&
+                            candidate.compare(candidate.size() - suffix.size(), suffix.size(), suffix) != 0)
+                                continue;
+
+                        std::string number = candidate.substr(prefix.size(),
+                                                              candidate.size() - prefix.size() - suffix.size());
+                        if (number.empty())
+                                continue;
+                        if (!std::all_of(number.begin(), number.end(), is_valid_digit))
+                                continue;
+
+                        unsigned long long value = 0;
+                        try
+                        {
+                                value = std::stoull(number, nullptr, base);
+                        }
+                        catch (std::exception const &)
+                        {
+                                continue;
+                        }
+
+                        if (value > std::numeric_limits<unsigned int>::max())
+                                continue;
+
+                        if (!found || value > max_index)
+                        {
+                                max_index = static_cast<unsigned int>(value);
+                                found = true;
+                        }
+                }
+        }
+
+        if (found)
+        {
+                if (max_index == std::numeric_limits<unsigned int>::max())
+                        frame_index_ = max_index;
+                else
+                        frame_index_ = max_index + 1;
+                return;
+        }
+
+        std::error_code exists_ec;
+        unsigned int candidate = 0;
+        while (candidate < std::numeric_limits<unsigned int>::max())
+        {
+                exists_ec.clear();
+                std::filesystem::path probe(composeFilename(candidate));
+                if (!std::filesystem::exists(probe, exists_ec) || exists_ec)
+                        break;
+                ++candidate;
+        }
+        frame_index_ = candidate;
 }
 
 void DngOutput::outputBuffer(void *mem, size_t size, int64_t, uint32_t)

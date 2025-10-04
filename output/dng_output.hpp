@@ -33,6 +33,8 @@ public:
         }
 
 private:
+        void initialiseFrameIndex();
+        std::string composeFilename(unsigned int index) const;
         std::string nextFilename();
         libcamera::ControlList waitForMetadata();
 
