@@ -27,6 +27,22 @@ socket with `--preview-gstreamer-socket <path>`, advertise a different client pi
 `--preview-gstreamer-client <pipeline>`, or disable the backend entirely via `--preview-gstreamer=none` / `--no-preview-gstreamer`.
 Supplying `--preview-gstreamer <pipeline>` replaces the internal pipeline with custom elements (downstream of `appsrc`).
 
+### Preview assists
+
+Preview overlays such as focus peaking live in `post_processing_stages/assist/` and plug into
+the existing post-processing pipeline. The new `focus_peaking` stage highlights high-frequency
+detail in the luma channel and optionally tints the chroma planes, making it easy to judge
+critical focus even with compressed previews. Enable it by adding the stage to the pipeline
+configuration referenced by `--post-process-file`:
+
+```
+{
+    "post_process": [
+        { "stage": "focus_peaking" }
+    ]
+}
+```
+
 ## HTTP endpoints
 
 All JSON endpoints accept and return UTF-8 encoded JSON. Unless noted otherwise
