@@ -49,6 +49,8 @@ if opencv_dep.found()
         'annotate_cv_stage.cpp',
         'plot_pose_cv_stage.cpp',
         'object_detect_draw_cv_stage.cpp',
+        'assist/preview_assist_stage.cpp',
+        'assist/focus_peaking_stage.cpp',
     ])
 
     # OpenCV assets
@@ -56,6 +58,7 @@ if opencv_dep.found()
         assets_dir / 'sobel_cv.json',
         assets_dir / 'face_detect_cv.json',
         assets_dir / 'annotate_cv.json',
+        assets_dir / 'focus_peaking.json',
     ])
 
     opencv_postproc_lib = shared_module('opencv-postproc', opencv_postproc_src,
@@ -123,7 +126,8 @@ post_processing_headers = files([
     'pwl.hpp',
     'segmentation.hpp',
     'tf_stage.hpp',
-    'ICM42688_registers.hpp'
+    'ICM42688_registers.hpp',
+    'assist/preview_assist_stage.hpp'
 ])
 
 install_headers(post_processing_headers, subdir: meson.project_name() / 'post_processing_stages')

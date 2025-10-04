@@ -1,0 +1,12 @@
+{
+    "class": "focus_peaking",
+    "threshold": 40,
+    "auto_threshold": true,
+    "auto_multiplier": 1.8,
+    "highlight_value": 255,
+    "tint_edges": true,
+    "highlight_u": 90,
+    "highlight_v": 240,
+    "blur_size": 3,
+    "dilate_iterations": 1
+}
