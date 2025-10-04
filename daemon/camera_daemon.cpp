@@ -1067,9 +1067,37 @@ void CameraDaemon::cameraLoop()
                                 {
                                         static constexpr char kCapsToken[] = "video/x-raw,format=RGBA";
                                         std::size_t caps_idx = pipeline.find(kCapsToken);
-                                        if (caps_idx != std::string::npos
-                                            && pipeline.find("width=", caps_idx) == std::string::npos)
+                                        if (caps_idx != std::string::npos)
                                         {
+                                                std::size_t caps_end = pipeline.find('!', caps_idx);
+                                                if (caps_end == std::string::npos)
+                                                        caps_end = pipeline.size();
+
+                                                std::string current_segment = pipeline.substr(caps_idx, caps_end - caps_idx);
+                                                std::size_t token_len = sizeof(kCapsToken) - 1;
+                                                std::string rest;
+                                                if (current_segment.size() > token_len)
+                                                        rest = current_segment.substr(token_len);
+
+                                                auto strip_token = [](std::string &text, const char *token) {
+                                                        std::size_t pos = text.find(token);
+                                                        while (pos != std::string::npos)
+                                                        {
+                                                                std::size_t end = text.find(',', pos + 1);
+                                                                if (end == std::string::npos)
+                                                                {
+                                                                        text.erase(pos);
+                                                                        break;
+                                                                }
+                                                                text.erase(pos, end - pos);
+                                                                pos = text.find(token, pos);
+                                                        }
+                                                };
+
+                                                strip_token(rest, ",width=");
+                                                strip_token(rest, ",height=");
+                                                strip_token(rest, ",framerate=");
+
                                                 std::ostringstream caps;
                                                 caps << kCapsToken;
                                                 if (vinfo.width && vinfo.height)
@@ -1082,8 +1110,16 @@ void CameraDaemon::cameraLoop()
                                                                 caps << ",framerate=" << fps_scaled << "/1000";
                                                 }
 
-                                                pipeline.replace(caps_idx, sizeof(kCapsToken) - 1, caps.str());
-                                                setPreviewClientPipeline(pipeline, false);
+                                                std::string new_segment = caps.str();
+                                                new_segment += rest;
+                                                if (!current_segment.empty() && current_segment.back() == ' ')
+                                                        new_segment.push_back(' ');
+
+                                                if (current_segment != new_segment)
+                                                {
+                                                        pipeline.replace(caps_idx, caps_end - caps_idx, new_segment);
+                                                        setPreviewClientPipeline(pipeline, false);
+                                                }
                                         }
                                 }
                         }
