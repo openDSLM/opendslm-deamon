@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <iomanip>
+#include <ctime>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -447,7 +448,11 @@ std::string CameraDaemon::buildCaptureJson(CaptureSummary const &capture)
                         json << ',';
                 json << jsonString(capture.frames[i]);
         }
-        json << "],\"count\":" << capture.frames.size() << "}";
+        json << "]";
+        json << ",\"count\":" << capture.frames.size();
+        if (!capture.directory.empty())
+                json << ",\"directory\":" << jsonString(capture.directory);
+        json << "}";
         return json.str();
 }
 

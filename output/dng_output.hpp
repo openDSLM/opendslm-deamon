@@ -23,7 +23,8 @@
 class DngOutput : public Output
 {
 public:
-        DngOutput(VideoOptions const *options, StreamInfo const &info, std::string camera_model);
+        DngOutput(VideoOptions const *options, StreamInfo const &info, std::string camera_model,
+                  std::string override_pattern = {});
 
         void outputBuffer(void *mem, size_t size, int64_t timestamp_us, uint32_t flags) override;
         void MetadataReady(libcamera::ControlList &metadata);

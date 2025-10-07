@@ -50,9 +50,10 @@ std::string derive_pattern(const std::string &output)
 
 } // namespace
 
-DngOutput::DngOutput(VideoOptions const *options, StreamInfo const &info, std::string camera_model)
+DngOutput::DngOutput(VideoOptions const *options, StreamInfo const &info, std::string camera_model,
+                     std::string override_pattern)
         : Output(options), info_(info), camera_model_(std::move(camera_model)),
-          filename_pattern_(derive_pattern(options->output))
+          filename_pattern_(derive_pattern(override_pattern.empty() ? options->output : override_pattern))
 {
         if (options->output == "-")
                 throw std::runtime_error("CinemaDNG output does not support writing to stdout");

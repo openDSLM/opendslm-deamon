@@ -50,6 +50,7 @@ struct CaptureSummary
 {
         std::string type;
         std::vector<std::string> frames;
+        std::string directory;
 };
 
 class CameraDaemon
@@ -94,6 +95,8 @@ private:
         static bool ensureOutputDirectory(std::string const &path, std::string &error_message);
         static void applySettingsToOptions(CameraSettings const &settings, VideoOptions &options,
                                            bool request_raw);
+        static std::string makeCaptureDirectory(const std::string &base, const std::string &prefix,
+                                                std::string &error_message);
 
         void registerRoutes();
         // Unified background camera loop
@@ -134,6 +137,7 @@ private:
         bool still_pending_ = false;
         std::vector<std::string> still_result_;
         std::condition_variable still_cv_;
+        std::string video_sequence_path_;
 };
 
 } // namespace rpicam
