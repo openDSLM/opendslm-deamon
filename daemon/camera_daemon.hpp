@@ -72,7 +72,8 @@ public:
         bool previewClientPipelineExplicit() const;
         void setShmSocket(const std::string &socket);
         std::string shmSocket() const;
-        bool startSession(SessionMode mode, std::string &error_message);
+        bool startSession(SessionMode mode, std::string &error_message,
+                          std::optional<std::string> directory = std::nullopt);
         bool stopSession(std::string &error_message);
 
 private:

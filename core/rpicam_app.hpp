@@ -171,6 +171,7 @@ public:
 	{
 		return camera_->properties();
 	}
+	Preview *GetPreview() const { return preview_.get(); }
 
 	static unsigned int verbosity;
 	static unsigned int GetVerbosity() { return verbosity; }

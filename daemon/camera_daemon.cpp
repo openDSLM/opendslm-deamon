@@ -16,6 +16,7 @@
 #include <string>
 #include <utility>
 #include <cmath>
+#include <cctype>
 
 #include <jpeglib.h>
 #include <libcamera/base/span.h>
@@ -27,6 +28,7 @@
 #include "core/stream_info.hpp"
 #include "encoder/null_encoder.hpp"
 #include "output/dng_output.hpp"
+#include "preview/preview.hpp"
 
 namespace rpicam
 {
@@ -304,7 +306,7 @@ bool CameraDaemon::updateSettings(JsonObject const &values, std::string &error_m
         return true;
 }
 
-bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
+bool CameraDaemon::startSession(SessionMode mode, std::string &error_message, std::optional<std::string> directory)
 {
         if (mode == SessionMode::Still)
         {
@@ -336,6 +338,31 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
 
         if (mode == SessionMode::Video)
         {
+                std::string resolved_directory;
+                if (directory && !directory->empty())
+                        resolved_directory = *directory;
+                else
+                {
+                        CameraSettings current = getSettings();
+                        std::string dir_error;
+                        resolved_directory = makeCaptureDirectory(current.output_dir, "clip", dir_error);
+                        if (resolved_directory.empty())
+                        {
+                                error_message = dir_error.empty() ? "Failed to prepare video directory" : dir_error;
+                                return false;
+                        }
+                }
+
+                if (!resolved_directory.empty())
+                {
+                        std::string ensure_error;
+                        if (!ensureOutputDirectory(resolved_directory, ensure_error))
+                        {
+                                error_message = ensure_error.empty() ? "Failed to prepare video directory" : ensure_error;
+                                return false;
+                        }
+                }
+
                 {
                         std::lock_guard<std::mutex> lock(capture_mutex_);
                         if (video_recording_)
@@ -344,12 +371,17 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
                                 return false;
                         }
                         video_recording_ = true;
+                        video_sequence_path_ = resolved_directory;
+                        active_output_.reset();
                 }
                 {
                         std::lock_guard<std::mutex> lock(mutex_);
                         session_.mode = SessionMode::Video;
                         session_.active = true;
                         session_.last_error.clear();
+                        last_capture_.type = "video";
+                        last_capture_.frames.clear();
+                        last_capture_.directory = resolved_directory;
                 }
                 return true;
         }
@@ -359,11 +391,14 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
                 {
                         std::lock_guard<std::mutex> lock(capture_mutex_);
                         video_recording_ = false;
+                        active_output_.reset();
+                        video_sequence_path_.clear();
                 }
                 {
                         std::lock_guard<std::mutex> lock(mutex_);
                         session_.active = false;
                         session_.mode = SessionMode::None;
+                        session_.last_error.clear();
                 }
                 error_message.clear();
                 return true;
@@ -383,6 +418,8 @@ bool CameraDaemon::stopSession(std::string &error_message)
                         return false;
                 }
                 video_recording_ = false;
+                active_output_.reset();
+                video_sequence_path_.clear();
         }
         {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -726,6 +763,69 @@ bool CameraDaemon::ensureOutputDirectory(std::string const &path, std::string &e
         return true;
 }
 
+std::string CameraDaemon::makeCaptureDirectory(const std::string &base, const std::string &prefix,
+                                                std::string &error_message)
+{
+        std::filesystem::path base_dir = base.empty() ? std::filesystem::path('.')
+                                                       : std::filesystem::path(base);
+
+        std::error_code ec;
+        if (!std::filesystem::exists(base_dir, ec))
+        {
+                if (!std::filesystem::create_directories(base_dir, ec) && ec)
+                {
+                        error_message = "Failed to create base directory: " + ec.message();
+                        return {};
+                }
+        }
+        else if (!std::filesystem::is_directory(base_dir, ec) || ec)
+        {
+                error_message = "Output directory is not valid";
+                return {};
+        }
+
+        auto now = std::chrono::system_clock::now();
+        std::time_t tt = std::chrono::system_clock::to_time_t(now);
+        std::tm tm {};
+#ifdef _WIN32
+        if (gmtime_s(&tm, &tt) != 0)
+                tm = {};
+#else
+        if (!gmtime_r(&tt, &tm))
+                tm = {};
+#endif
+        std::ostringstream timestamp;
+        timestamp << std::put_time(&tm, "%Y%m%d_%H%M%S");
+        if (!prefix.empty())
+                timestamp << '_' << prefix;
+
+        std::string base_name = timestamp.str();
+        std::filesystem::path candidate = base_dir / base_name;
+
+        std::error_code exists_ec;
+        int suffix = 1;
+        while (std::filesystem::exists(candidate, exists_ec))
+        {
+                if (exists_ec)
+                {
+                        error_message = "Failed to query capture directory: " + exists_ec.message();
+                        return {};
+                }
+                std::ostringstream alt;
+                alt << base_name << '_' << std::setfill('0') << std::setw(2) << suffix++;
+                candidate = base_dir / alt.str();
+                exists_ec.clear();
+        }
+
+        if (!std::filesystem::create_directories(candidate, ec) && ec)
+        {
+                error_message = "Failed to create capture directory: " + ec.message();
+                return {};
+        }
+
+        return candidate.string();
+}
+
 void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoOptions &options, bool request_raw)
 {
         options.timeout.value = std::chrono::nanoseconds(0);
@@ -741,8 +841,8 @@ void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoO
         options.info_text.clear();
         options.width = 0;
         options.height = 0;
-        options.viewfinder_width = 0;
-        options.viewfinder_height = 0;
+        options.viewfinder_width = 640;
+        options.viewfinder_height = 480;
         options.lores_width = 0;
         options.lores_height = 0;
         options.lores_par = false;
@@ -915,51 +1015,64 @@ void CameraDaemon::registerRoutes()
                 return response;
         });
 
-server_.addHandler("POST", "/recordings/video", [this](HttpRequest const &) {
+server_.addHandler("POST", "/recordings/video", [this](HttpRequest const &request) {
                 HttpResponse response;
+                std::optional<std::string> directory;
+                if (!request.body.empty())
                 {
-                        std::lock_guard<std::mutex> lock(capture_mutex_);
-                        if (video_recording_)
+                        JsonObject values = parseJsonObject(request.body);
+                        auto it = values.find("directory");
+                        if (it != values.end())
                         {
-                                response.status_code = 409;
-                                response.body = "{\"error\":\"Video already recording\"}";
-                                return response;
+                                auto dir = it->second.asString();
+                                if (!dir)
+                                {
+                                        response.status_code = 400;
+                                        response.body = "{\"error\":\"directory must be a string\"}";
+                                        return response;
+                                }
+                                if (dir->empty())
+                                {
+                                        response.status_code = 400;
+                                        response.body = "{\"error\":\"directory must be non-empty\"}";
+                                        return response;
+                                }
+                                directory = *dir;
                         }
-                        video_recording_ = true;
                 }
+
+                std::string error;
+                if (!startSession(SessionMode::Video, error, directory))
                 {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        session_.mode = SessionMode::Video;
-                        session_.active = true;
-                        session_.last_error.clear();
+                        response.status_code = 409;
+                        if (!error.empty())
+                                response.body = "{\"error\":" + jsonString(error) + "}";
+                        else
+                                response.body = "{\"error\":\"Failed to start video session\"}";
+                        return response;
                 }
+
                 response.body = buildStatusJson();
                 return response;
         });
 
 server_.addHandler("DELETE", "/recordings/video", [this](HttpRequest const &) {
                 HttpResponse response;
-                bool was_active = false;
-                {
-                        std::lock_guard<std::mutex> lock(capture_mutex_);
-                        was_active = video_recording_;
-                        video_recording_ = false;
-                }
-                if (!was_active)
+                std::string error;
+                if (!stopSession(error))
                 {
                         response.status_code = 409;
-                        response.body = "{\"error\":\"No active video session\"}";
+                        if (!error.empty())
+                                response.body = "{\"error\":" + jsonString(error) + "}";
+                        else
+                                response.body = "{\"error\":\"No active video session\"}";
                         return response;
-                }
-                {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        session_.active = false;
-                        session_.mode = SessionMode::None;
                 }
                 response.body = buildStatusJson();
                 return response;
         });
 
+        server_.addHandler("GET", "/preview", [this](HttpRequest const &) {
         server_.addHandler("GET", "/preview", [this](HttpRequest const &) {
                 PreviewSubscription preview_client(preview_clients_, preview_enabled_);
                 HttpResponse response;
@@ -1068,6 +1181,50 @@ void CameraDaemon::cameraLoop()
                         if (!previewClientPipelineExplicit())
                         {
                                 std::string pipeline = previewClientPipeline();
+                                bool updated = false;
+
+#ifdef GSTREAMER_PRESENT
+                                auto replace_socket_path = [](std::string &text, const std::string &path) -> bool {
+                                        static constexpr char kSocketToken[] = "socket-path=";
+                                        std::size_t pos = text.find(kSocketToken);
+                                        if (pos == std::string::npos)
+                                                return false;
+                                        pos += sizeof(kSocketToken) - 1;
+                                        std::size_t value_start = pos;
+                                        bool quoted = value_start < text.size() && text[value_start] == '"';
+                                        std::size_t value_end = value_start;
+                                        if (quoted)
+                                        {
+                                                ++value_start;
+                                                value_end = value_start;
+                                                while (value_end < text.size() && text[value_end] != '"')
+                                                        ++value_end;
+                                                if (value_end >= text.size())
+                                                        return false;
+                                                if (text.compare(value_start, value_end - value_start, path) == 0)
+                                                        return false;
+                                                text.replace(value_start, value_end - value_start, path);
+                                        }
+                                        else
+                                        {
+                                                while (value_end < text.size() &&
+                                                       !std::isspace(static_cast<unsigned char>(text[value_end])) &&
+                                                       text[value_end] != '!')
+                                                        ++value_end;
+                                                if (text.compare(value_start, value_end - value_start, path) == 0)
+                                                        return false;
+                                                text.replace(value_start, value_end - value_start, path);
+                                        }
+                                        std::cerr << "[daemon] replace socket-path => " << path << std::endl;
+                                        return true;
+                                };
+
+                                std::string socket_path = preview_gstreamer_socket_path(app.GetPreview());
+                                std::cerr << "[daemon] detected preview socket path: " << socket_path << std::endl;
+                                if (!socket_path.empty())
+                                        updated |= replace_socket_path(pipeline, socket_path);
+#endif
+
                                 if (!pipeline.empty())
                                 {
                                         static constexpr char kCapsToken[] = "video/x-raw,format=RGBA";
@@ -1088,14 +1245,14 @@ void CameraDaemon::cameraLoop()
                                                         std::size_t pos = text.find(token);
                                                         while (pos != std::string::npos)
                                                         {
-                                                                std::size_t end = text.find(',', pos + 1);
-                                                                if (end == std::string::npos)
-                                                                {
-                                                                        text.erase(pos);
-                                                                        break;
-                                                                }
-                                                                text.erase(pos, end - pos);
-                                                                pos = text.find(token, pos);
+                                                std::size_t end = text.find(',', pos + 1);
+                                                if (end == std::string::npos)
+                                                {
+                                                        text.erase(pos);
+                                                        break;
+                                                }
+                                                text.erase(pos, end - pos);
+                                                pos = text.find(token, pos);
                                                         }
                                                 };
 
@@ -1123,9 +1280,15 @@ void CameraDaemon::cameraLoop()
                                                 if (current_segment != new_segment)
                                                 {
                                                         pipeline.replace(caps_idx, caps_end - caps_idx, new_segment);
-                                                        setPreviewClientPipeline(pipeline, false);
+                                                        updated = true;
                                                 }
                                         }
+                                }
+
+                                if (updated)
+                                {
+                                        std::cerr << "[daemon] updated preview client pipeline: " << pipeline << std::endl;
+                                        setPreviewClientPipeline(pipeline, false);
                                 }
                         }
 
@@ -1138,7 +1301,10 @@ void CameraDaemon::cameraLoop()
                         auto ensure_output = [this, options, &rinfo, &app]() {
                                 if (active_output_)
                                         return;
-                                auto out = std::make_shared<DngOutput>(options, rinfo, app.CameraModel());
+                                std::string override_pattern;
+                                if (video_recording_ && !video_sequence_path_.empty())
+                                        override_pattern = video_sequence_path_;
+                                auto out = std::make_shared<DngOutput>(options, rinfo, app.CameraModel(), override_pattern);
                                 out->SetFrameWrittenCallback([this](std::string const &path) {
                                         std::lock_guard<std::mutex> lock(capture_mutex_);
                                         if (still_pending_)
@@ -1152,6 +1318,7 @@ void CameraDaemon::cameraLoop()
                                                 std::lock_guard<std::mutex> lock2(mutex_);
                                                 last_capture_.type = "video";
                                                 last_capture_.frames.push_back(path);
+                                                last_capture_.directory = video_sequence_path_;
                                         }
                                 });
                                 active_output_ = std::move(out);
