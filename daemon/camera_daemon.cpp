@@ -304,7 +304,7 @@ bool CameraDaemon::updateSettings(JsonObject const &values, std::string &error_m
         return true;
 }
 
-bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
+bool CameraDaemon::startSession(SessionMode mode, const std::string &video_path, std::string &error_message)
 {
         if (mode == SessionMode::Still)
         {
@@ -336,6 +336,26 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
 
         if (mode == SessionMode::Video)
         {
+                std::string target_path = video_path;
+                if (target_path.empty())
+                {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        target_path = settings_.output_dir;
+                }
+
+                if (target_path.empty())
+                {
+                        error_message = "No output directory configured for video capture";
+                        return false;
+                }
+
+                std::string ensure_error;
+                if (!ensureOutputDirectory(target_path, ensure_error))
+                {
+                        error_message = ensure_error;
+                        return false;
+                }
+
                 {
                         std::lock_guard<std::mutex> lock(capture_mutex_);
                         if (video_recording_)
@@ -344,12 +364,16 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
                                 return false;
                         }
                         video_recording_ = true;
+                        video_sequence_path_ = target_path;
                 }
                 {
                         std::lock_guard<std::mutex> lock(mutex_);
                         session_.mode = SessionMode::Video;
                         session_.active = true;
                         session_.last_error.clear();
+                        last_capture_.type = "video";
+                        last_capture_.frames.clear();
+                        last_capture_.directory = target_path;
                 }
                 return true;
         }
@@ -359,6 +383,7 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
                 {
                         std::lock_guard<std::mutex> lock(capture_mutex_);
                         video_recording_ = false;
+                        video_sequence_path_.clear();
                 }
                 {
                         std::lock_guard<std::mutex> lock(mutex_);
@@ -383,6 +408,7 @@ bool CameraDaemon::stopSession(std::string &error_message)
                         return false;
                 }
                 video_recording_ = false;
+                video_sequence_path_.clear();
         }
         {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -820,7 +846,34 @@ void CameraDaemon::registerRoutes()
                         return response;
                 }
 
-                if (!startSession(mode, error))
+                std::string video_path;
+                if (auto it_path = values.find("path"); it_path != values.end())
+                {
+                        auto path_value = it_path->second.asString();
+                        if (!path_value)
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":\"path must be a string\"}";
+                                return response;
+                        }
+                        video_path = *path_value;
+                }
+                if (video_path.empty())
+                {
+                        if (auto it_dir = values.find("directory"); it_dir != values.end())
+                        {
+                                auto dir_value = it_dir->second.asString();
+                                if (!dir_value)
+                                {
+                                        response.status_code = 400;
+                                        response.body = "{\"error\":\"directory must be a string\"}";
+                                        return response;
+                                }
+                                video_path = *dir_value;
+                        }
+                }
+
+                if (!startSession(mode, video_path, error))
                 {
                         response.status_code = 409;
                         if (!error.empty())
@@ -915,46 +968,66 @@ void CameraDaemon::registerRoutes()
                 return response;
         });
 
-server_.addHandler("POST", "/recordings/video", [this](HttpRequest const &) {
+        server_.addHandler("POST", "/recordings/video", [this](HttpRequest const &request) {
                 HttpResponse response;
+                JsonObject values = parseJsonObject(request.body);
+                std::string directory;
+                if (auto it_path = values.find("path"); it_path != values.end())
                 {
-                        std::lock_guard<std::mutex> lock(capture_mutex_);
-                        if (video_recording_)
+                        auto path_value = it_path->second.asString();
+                        if (!path_value)
                         {
-                                response.status_code = 409;
-                                response.body = "{\"error\":\"Video already recording\"}";
+                                response.status_code = 400;
+                                response.body = "{\"error\":\"path must be a string\"}";
                                 return response;
                         }
-                        video_recording_ = true;
+                        directory = *path_value;
                 }
+                if (directory.empty())
                 {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        session_.mode = SessionMode::Video;
-                        session_.active = true;
-                        session_.last_error.clear();
+                        if (auto it_dir = values.find("directory"); it_dir != values.end())
+                        {
+                                auto dir_value = it_dir->second.asString();
+                                if (!dir_value)
+                                {
+                                        response.status_code = 400;
+                                        response.body = "{\"error\":\"directory must be a string\"}";
+                                        return response;
+                                }
+                                directory = *dir_value;
+                        }
                 }
+
+                if (directory.empty())
+                {
+                        response.status_code = 400;
+                        response.body = "{\"error\":\"Missing field: path\"}";
+                        return response;
+                }
+
+                std::string error;
+                if (!startSession(SessionMode::Video, directory, error))
+                {
+                        response.status_code = 409;
+                        if (!error.empty())
+                                response.body = "{\"error\":" + jsonString(error) + "}";
+                        else
+                                response.body = "{\"error\":\"Failed to start video recording\"}";
+                        return response;
+                }
+
                 response.body = buildStatusJson();
                 return response;
         });
 
-server_.addHandler("DELETE", "/recordings/video", [this](HttpRequest const &) {
+        server_.addHandler("DELETE", "/recordings/video", [this](HttpRequest const &) {
                 HttpResponse response;
-                bool was_active = false;
-                {
-                        std::lock_guard<std::mutex> lock(capture_mutex_);
-                        was_active = video_recording_;
-                        video_recording_ = false;
-                }
-                if (!was_active)
+                std::string error;
+                if (!stopSession(error))
                 {
                         response.status_code = 409;
-                        response.body = "{\"error\":\"No active video session\"}";
+                        response.body = "{\"error\":" + jsonString(error) + "}";
                         return response;
-                }
-                {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        session_.active = false;
-                        session_.mode = SessionMode::None;
                 }
                 response.body = buildStatusJson();
                 return response;
@@ -1138,7 +1211,10 @@ void CameraDaemon::cameraLoop()
                         auto ensure_output = [this, options, &rinfo, &app]() {
                                 if (active_output_)
                                         return;
-                                auto out = std::make_shared<DngOutput>(options, rinfo, app.CameraModel());
+                                std::string override_pattern = video_sequence_path_.empty() ? options->output
+                                                                                            : video_sequence_path_;
+                                auto out = std::make_shared<DngOutput>(options, rinfo, app.CameraModel(),
+                                                                       override_pattern);
                                 out->SetFrameWrittenCallback([this](std::string const &path) {
                                         std::lock_guard<std::mutex> lock(capture_mutex_);
                                         if (still_pending_)
