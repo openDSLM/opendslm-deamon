@@ -329,6 +329,11 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
                         std::lock_guard<std::mutex> lock(mutex_);
                         last_capture_.type = "still";
                         last_capture_.frames = std::move(frames);
+                        if (!last_capture_.frames.empty())
+                                last_capture_.directory =
+                                        std::filesystem::path(last_capture_.frames.front()).parent_path().string();
+                        else
+                                last_capture_.directory.clear();
                         session_.last_error.clear();
                 }
                 return true;
@@ -336,6 +341,13 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
 
         if (mode == SessionMode::Video)
         {
+                CameraSettings settings = getSettings();
+                std::string ensure_error;
+                if (!ensureOutputDirectory(settings.output_dir, ensure_error))
+                {
+                        error_message = ensure_error;
+                        return false;
+                }
                 {
                         std::lock_guard<std::mutex> lock(capture_mutex_);
                         if (video_recording_)
@@ -344,12 +356,17 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
                                 return false;
                         }
                         video_recording_ = true;
+                        video_sequence_path_ = settings.output_dir;
+                        active_output_.reset();
                 }
                 {
                         std::lock_guard<std::mutex> lock(mutex_);
                         session_.mode = SessionMode::Video;
                         session_.active = true;
                         session_.last_error.clear();
+                        last_capture_.type = "video";
+                        last_capture_.frames.clear();
+                        last_capture_.directory = settings.output_dir;
                 }
                 return true;
         }
@@ -359,6 +376,7 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message)
                 {
                         std::lock_guard<std::mutex> lock(capture_mutex_);
                         video_recording_ = false;
+                        video_sequence_path_.clear();
                 }
                 {
                         std::lock_guard<std::mutex> lock(mutex_);
@@ -383,6 +401,8 @@ bool CameraDaemon::stopSession(std::string &error_message)
                         return false;
                 }
                 video_recording_ = false;
+                video_sequence_path_.clear();
+                active_output_.reset();
         }
         {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -901,6 +921,11 @@ void CameraDaemon::registerRoutes()
                         session_.last_error.clear();
                         last_capture_.type = "still";
                         last_capture_.frames = frames;
+                        if (!last_capture_.frames.empty())
+                                last_capture_.directory =
+                                        std::filesystem::path(last_capture_.frames.front()).parent_path().string();
+                        else
+                                last_capture_.directory.clear();
                 }
 
                 std::ostringstream body;
@@ -915,8 +940,37 @@ void CameraDaemon::registerRoutes()
                 return response;
         });
 
-server_.addHandler("POST", "/recordings/video", [this](HttpRequest const &) {
+server_.addHandler("POST", "/recordings/video", [this](HttpRequest const &request) {
                 HttpResponse response;
+                std::string directory_override;
+                if (!request.body.empty())
+                {
+                        JsonObject values = parseJsonObject(request.body);
+                        auto dir_it = values.find("directory");
+                        if (dir_it == values.end())
+                                dir_it = values.find("path");
+                        if (dir_it != values.end())
+                        {
+                                auto dir = dir_it->second.asString();
+                                if (!dir || dir->empty())
+                                {
+                                        response.status_code = 400;
+                                        response.body = "{\"error\":\"directory must be a non-empty string\"}";
+                                        return response;
+                                }
+                                directory_override = *dir;
+                        }
+                }
+                if (directory_override.empty())
+                        directory_override = getSettings().output_dir;
+
+                std::string ensure_error;
+                if (!ensureOutputDirectory(directory_override, ensure_error))
+                {
+                        response.status_code = 400;
+                        response.body = "{\"error\":" + jsonString(ensure_error) + "}"; 
+                        return response;
+                }
                 {
                         std::lock_guard<std::mutex> lock(capture_mutex_);
                         if (video_recording_)
@@ -926,12 +980,17 @@ server_.addHandler("POST", "/recordings/video", [this](HttpRequest const &) {
                                 return response;
                         }
                         video_recording_ = true;
+                        video_sequence_path_ = directory_override;
+                        active_output_.reset();
                 }
                 {
                         std::lock_guard<std::mutex> lock(mutex_);
                         session_.mode = SessionMode::Video;
                         session_.active = true;
                         session_.last_error.clear();
+                        last_capture_.type = "video";
+                        last_capture_.frames.clear();
+                        last_capture_.directory = directory_override;
                 }
                 response.body = buildStatusJson();
                 return response;
@@ -944,6 +1003,8 @@ server_.addHandler("DELETE", "/recordings/video", [this](HttpRequest const &) {
                         std::lock_guard<std::mutex> lock(capture_mutex_);
                         was_active = video_recording_;
                         video_recording_ = false;
+                        video_sequence_path_.clear();
+                        active_output_.reset();
                 }
                 if (!was_active)
                 {
@@ -1135,10 +1196,11 @@ void CameraDaemon::cameraLoop()
                                 throw std::runtime_error("Raw stream unavailable");
 
                         // Prepare DNG writer creation lambda
-                        auto ensure_output = [this, options, &rinfo, &app]() {
+                        auto ensure_output = [this, options, &rinfo, &app](std::string const &override_pattern) {
                                 if (active_output_)
                                         return;
-                                auto out = std::make_shared<DngOutput>(options, rinfo, app.CameraModel());
+                                auto out = std::make_shared<DngOutput>(options, rinfo, app.CameraModel(),
+                                                                        override_pattern);
                                 out->SetFrameWrittenCallback([this](std::string const &path) {
                                         std::lock_guard<std::mutex> lock(capture_mutex_);
                                         if (still_pending_)
@@ -1208,7 +1270,12 @@ void CameraDaemon::cameraLoop()
                                         need_output = video_recording_ || still_pending_;
                                         keep_output = video_recording_;
                                         if (need_output && !active_output_)
-                                                ensure_output();
+                                        {
+                                                std::string override_pattern;
+                                                if (video_recording_ && !video_sequence_path_.empty())
+                                                        override_pattern = video_sequence_path_;
+                                                ensure_output(override_pattern);
+                                        }
                                 }
                                 if (need_output)
                                         app.EncodeBuffer(completed_request, rstream);

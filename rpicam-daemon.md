@@ -81,7 +81,8 @@ needed). `last_capture` becomes a structure such as
 {
   "type": "still",
   "frames": ["/ssd/RAW/frame-00000000.dng"],
-  "count": 1
+  "count": 1,
+  "directory": "/ssd/RAW"
 }
 ```
 
@@ -135,7 +136,17 @@ A HTTP 409 is returned if another session is already active.
 ### `POST /recordings/video`
 
 Starts a CinemaDNG video recording that runs until it is explicitly stopped.
-The response contains the updated daemon status.
+The request body can optionally specify a JSON payload with a `directory` field
+that points to the folder where the DNG frames should be written. For example:
+
+```json
+{"directory": "/ssd/RAW/shot-01"}
+```
+
+If omitted, the daemon writes into the `output_dir` configured via `POST /settings`.
+The directory is created if necessary and frames are emitted as
+`frame-########.dng`, ready to be imported into DaVinci Resolve as an image
+sequence. The response contains the updated daemon status.
 
 ### `DELETE /recordings/video`
 
@@ -190,8 +201,9 @@ curl -X POST http://localhost:8400/settings      -H 'Content-Type: application/j
 # Fetch a JPEG preview frame
 curl http://localhost:8400/preview --output preview.jpg
 
-# Start a CinemaDNG video recording
-curl -X POST http://localhost:8400/recordings/video
+# Start a CinemaDNG video recording (writing frames into /ssd/RAW/shot-01)
+curl -X POST http://localhost:8400/recordings/video \
+-H 'Content-Type: application/json' -d '{"directory":"/ssd/RAW/shot-01"}'
 
 # Stop the recording
 curl -X DELETE http://localhost:8400/recordings/video
