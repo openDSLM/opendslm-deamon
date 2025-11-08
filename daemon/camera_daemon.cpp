@@ -338,12 +338,22 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message, st
 
         if (mode == SessionMode::Video)
         {
+                CameraSettings current = getSettings();
                 std::string resolved_directory;
                 if (directory && !directory->empty())
-                        resolved_directory = *directory;
+                {
+                        std::filesystem::path provided(*directory);
+                        if (provided.is_relative())
+                        {
+                                std::filesystem::path base = current.output_dir.empty()
+                                        ? std::filesystem::path(".")
+                                        : std::filesystem::path(current.output_dir);
+                                provided = (base / provided).lexically_normal();
+                        }
+                        resolved_directory = provided.string();
+                }
                 else
                 {
-                        CameraSettings current = getSettings();
                         std::string dir_error;
                         resolved_directory = makeCaptureDirectory(current.output_dir, "clip", dir_error);
                         if (resolved_directory.empty())
@@ -383,6 +393,7 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message, st
                         last_capture_.frames.clear();
                         last_capture_.directory = resolved_directory;
                 }
+                camera_reconfigure_.store(true);
                 return true;
         }
 
@@ -525,7 +536,7 @@ CameraDaemon::CaptureResult CameraDaemon::runCineDngCapture(CameraSettings const
                         throw std::runtime_error("Raw stream unavailable - cannot write CinemaDNG");
 
                 std::unique_ptr<DngOutput> output =
-                        std::make_unique<DngOutput>(options, raw_info, app.CameraModel());
+                        std::make_unique<DngOutput>(options, raw_info, app.CameraModel(), std::string(), false);
                 output->SetFrameWrittenCallback([&result](std::string const &path) {
                         result.frames.push_back(path);
                 });
@@ -1021,20 +1032,37 @@ server_.addHandler("POST", "/recordings/video", [this](HttpRequest const &reques
                 if (!request.body.empty())
                 {
                         JsonObject values = parseJsonObject(request.body);
-                        auto it = values.find("directory");
-                        if (it != values.end())
+                        JsonValue const *value = nullptr;
+                        const char *field_name = nullptr;
+                        if (auto it = values.find("directory"); it != values.end())
                         {
-                                auto dir = it->second.asString();
+                                field_name = "directory";
+                                value = &it->second;
+                        }
+                        else if (auto it = values.find("folder"); it != values.end())
+                        {
+                                field_name = "folder";
+                                value = &it->second;
+                        }
+                        else if (auto it = values.find("folder_name"); it != values.end())
+                        {
+                                field_name = "folder_name";
+                                value = &it->second;
+                        }
+
+                        if (value)
+                        {
+                                auto dir = value->asString();
                                 if (!dir)
                                 {
                                         response.status_code = 400;
-                                        response.body = "{\"error\":\"directory must be a string\"}";
+                                        response.body = std::string("{\"error\":\"") + field_name + " must be a string\"}";
                                         return response;
                                 }
                                 if (dir->empty())
                                 {
                                         response.status_code = 400;
-                                        response.body = "{\"error\":\"directory must be non-empty\"}";
+                                        response.body = std::string("{\"error\":\"") + field_name + " must be non-empty\"}";
                                         return response;
                                 }
                                 directory = *dir;
@@ -1148,6 +1176,18 @@ void CameraDaemon::cameraLoop()
 
                         CameraSettings settings = getSettings();
                         applySettingsToOptions(settings, *options, true /* request raw */);
+
+                std::string dng_output = settings.output_dir;
+                {
+                        std::lock_guard<std::mutex> lock(capture_mutex_);
+                        if (video_recording_ && !video_sequence_path_.empty())
+                        {
+                                std::filesystem::path clip_dir(video_sequence_path_);
+                                dng_output = (clip_dir / "frame-%08u.dng").string();
+                        }
+                }
+                options->output = dng_output;
+                LOG(1, "Configuring DNG output path: " << options->output);
 
                         // Set callbacks that forward to an active DNG writer when present
                         app.SetEncodeOutputReadyCallback([this](void *mem, size_t size, int64_t ts, bool key) {
@@ -1299,17 +1339,41 @@ void CameraDaemon::cameraLoop()
 
                         // Prepare DNG writer creation lambda
                         auto ensure_output = [this, options, &rinfo, &app]() {
-                                if (active_output_)
-                                        return;
+                                std::string clip_directory;
                                 std::string override_pattern;
-                                if (video_recording_ && !video_sequence_path_.empty())
-                                        override_pattern = video_sequence_path_;
-                                auto out = std::make_shared<DngOutput>(options, rinfo, app.CameraModel(), override_pattern);
-                                out->SetFrameWrittenCallback([this](std::string const &path) {
+                                bool recording = false;
+                                {
+                                        std::lock_guard<std::mutex> lock(capture_mutex_);
+                                        if (active_output_)
+                                                return;
+                                        recording = video_recording_;
+                                        if (recording && !video_sequence_path_.empty())
+                                        {
+                                                clip_directory = video_sequence_path_;
+                                                override_pattern =
+                                                        (std::filesystem::path(clip_directory) / "frame-%08u.dng")
+                                                                .string();
+                                        }
+                                }
+
+                                if (recording && !override_pattern.empty())
+                                        LOG(1, "Instantiating video DNG writer: " << override_pattern);
+                                else if (recording)
+                                        LOG(1, "Instantiating video DNG writer without clip directory, using "
+                                                        << options->output);
+                                else
+                                        LOG(2, "Instantiating still DNG writer: " << options->output);
+
+                                bool reset_index = recording;
+                                auto out = std::make_shared<DngOutput>(options, rinfo, app.CameraModel(),
+                                                                        override_pattern, reset_index);
+                                out->SetFrameWrittenCallback([this, clip_directory](std::string const &path) {
+                                        std::string final_path = path;
+
                                         std::lock_guard<std::mutex> lock(capture_mutex_);
                                         if (still_pending_)
                                         {
-                                                still_result_.push_back(path);
+                                                still_result_.push_back(final_path);
                                                 still_pending_ = false;
                                                 still_cv_.notify_all();
                                         }
@@ -1317,11 +1381,16 @@ void CameraDaemon::cameraLoop()
                                         {
                                                 std::lock_guard<std::mutex> lock2(mutex_);
                                                 last_capture_.type = "video";
-                                                last_capture_.frames.push_back(path);
-                                                last_capture_.directory = video_sequence_path_;
+                                                last_capture_.frames.push_back(final_path);
+                                                last_capture_.directory =
+                                                        clip_directory.empty() ? video_sequence_path_ : clip_directory;
                                         }
                                 });
-                                active_output_ = std::move(out);
+                                {
+                                        std::lock_guard<std::mutex> lock(capture_mutex_);
+                                        if (!active_output_)
+                                                active_output_ = std::move(out);
+                                }
                         };
 
                         app.StartEncoder();
@@ -1369,22 +1438,16 @@ void CameraDaemon::cameraLoop()
 
                                 // Handle capturing frames to DNG when requested
                                 bool need_output = false;
-                                bool keep_output = false;
                                 {
                                         std::lock_guard<std::mutex> lock(capture_mutex_);
                                         need_output = video_recording_ || still_pending_;
-                                        keep_output = video_recording_;
-                                        if (need_output && !active_output_)
-                                                ensure_output();
+                                        if (!need_output && active_output_)
+                                                active_output_.reset();
                                 }
                                 if (need_output)
-                                        app.EncodeBuffer(completed_request, rstream);
-                                else
                                 {
-                                        // Drop any active output if not recording
-                                        std::lock_guard<std::mutex> lock(capture_mutex_);
-                                        if (active_output_ && !keep_output)
-                                                active_output_.reset();
+                                        ensure_output();
+                                        app.EncodeBuffer(completed_request, rstream);
                                 }
                         }
 

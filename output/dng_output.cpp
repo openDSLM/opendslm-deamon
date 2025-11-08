@@ -51,14 +51,14 @@ std::string derive_pattern(const std::string &output)
 } // namespace
 
 DngOutput::DngOutput(VideoOptions const *options, StreamInfo const &info, std::string camera_model,
-                     std::string override_pattern)
+                     std::string override_pattern, bool reset_frame_index)
         : Output(options), info_(info), camera_model_(std::move(camera_model)),
           filename_pattern_(derive_pattern(override_pattern.empty() ? options->output : override_pattern))
 {
         if (options->output == "-")
                 throw std::runtime_error("CinemaDNG output does not support writing to stdout");
 
-        initialiseFrameIndex();
+        initialiseFrameIndex(reset_frame_index);
 }
 
 void DngOutput::MetadataReady(libcamera::ControlList &metadata)
@@ -103,8 +103,14 @@ std::string DngOutput::composeFilename(unsigned int index) const
         return std::string(filename.data(), n);
 }
 
-void DngOutput::initialiseFrameIndex()
+void DngOutput::initialiseFrameIndex(bool reset_frame_index)
 {
+        if (reset_frame_index)
+        {
+                frame_index_ = 0;
+                return;
+        }
+
         std::filesystem::path sample_path(composeFilename(0));
         std::filesystem::path directory = sample_path.has_parent_path() ? sample_path.parent_path()
                                                                        : std::filesystem::path(".");
