@@ -5,8 +5,12 @@
  * dng.cpp - Save raw image as DNG file.
  */
 
+#include <algorithm>
+#include <cmath>
+#include <initializer_list>
 #include <limits>
 #include <map>
+#include <cstdint>
 
 #include <libcamera/control_ids.h>
 #include <libcamera/formats.h>
@@ -15,9 +19,15 @@
 
 #include "core/still_options.hpp"
 #include "core/stream_info.hpp"
+#include "image/image.hpp"
+#include "metadata_config.hpp"
 
 #ifndef MAKE_STRING
 #define MAKE_STRING "Raspberry Pi"
+#endif
+
+#ifndef TIFFTAG_PREVIEWCOLORSPACE
+#define TIFFTAG_PREVIEWCOLORSPACE 0xc71a
 #endif
 
 using namespace libcamera;
@@ -335,7 +345,8 @@ Matrix(float m0, float m1, float m2,
 };
 
 void dng_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const &info, ControlList const &metadata,
-			  std::string const &filename, std::string const &cam_model, StillOptions const *options)
+			  std::string const &filename, std::string const &cam_model, StillOptions const *options,
+			  ImageMetadata const &image_metadata)
 {
 	// Check the Bayer format and unpack it to u16.
 
@@ -446,9 +457,37 @@ void dng_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const
 	try
 	{
 		const short cfa_repeat_pattern_dim[] = { 2, 2 };
+		constexpr unsigned int preview_target_pixels = 640u * 480u;
+		unsigned int thumbnail_block_size = 2;
+		if (info.width > 0 && info.height > 0)
+		{
+			double total_pixels = static_cast<double>(info.width) * static_cast<double>(info.height);
+			double ideal_scale = std::sqrt(total_pixels / static_cast<double>(preview_target_pixels));
+			unsigned int scale = ideal_scale > 1.0 ? static_cast<unsigned int>(std::ceil(ideal_scale)) : 2u;
+			if (scale & 1)
+				scale++; // keep even to respect Bayer pattern alignment
+			thumbnail_block_size = std::clamp(scale, 2u, 64u);
+		}
+
+		unsigned int effective_width = std::max(1u, info.width);
+		unsigned int effective_height = std::max(1u, info.height);
+		unsigned int thumb_width = std::max(
+			1u, static_cast<unsigned int>((effective_width + thumbnail_block_size - 1) / thumbnail_block_size));
+		unsigned int thumb_height = std::max(
+			1u, static_cast<unsigned int>((effective_height + thumbnail_block_size - 1) / thumbnail_block_size));
 		uint32_t white = (1 << bayer_format.bits) - 1;
 		toff_t offset_subifd = 0, offset_exififd = 0;
-		std::string unique_model = std::string(MAKE_STRING " ") + cam_model;
+		std::string sensor_label = cam_model.empty() ? "Unknown Sensor" : cam_model;
+		std::string effective_make = image_metadata.make.empty() ? std::string(ODS_DEFAULT_MAKE) : image_metadata.make;
+		std::string effective_model = image_metadata.model.empty()
+			? (std::string(ODS_DEFAULT_MODEL_PREFIX) + " (" + sensor_label + ")")
+			: image_metadata.model;
+		std::string effective_unique = image_metadata.unique_model.empty()
+			? (effective_make + " " + effective_model)
+			: image_metadata.unique_model;
+		std::string effective_software = image_metadata.software.empty()
+			? std::string(ODS_DEFAULT_SOFTWARE)
+			: image_metadata.software;
 
 		tif = TIFFOpen(filename.c_str(), "w");
 		if (!tif)
@@ -457,42 +496,144 @@ void dng_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const
 		// This is just the thumbnail, but put it first to help software that only
 		// reads the first IFD.
 		TIFFSetField(tif, TIFFTAG_SUBFILETYPE, 1);
-		TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, info.width >> 4);
-		TIFFSetField(tif, TIFFTAG_IMAGELENGTH, info.height >> 4);
+		TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, thumb_width);
+		TIFFSetField(tif, TIFFTAG_IMAGELENGTH, thumb_height);
 		TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE, 8);
-		TIFFSetField(tif, TIFFTAG_COMPRESSION, COMPRESSION_NONE);
+		TIFFSetField(tif, TIFFTAG_COMPRESSION, COMPRESSION_JPEG);
+		TIFFSetField(tif, TIFFTAG_JPEGQUALITY, 80);
+		TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP, thumb_height);
+		TIFFSetField(tif, TIFFTAG_JPEGCOLORMODE, JPEGCOLORMODE_RGB);
 		TIFFSetField(tif, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
-		TIFFSetField(tif, TIFFTAG_MAKE, MAKE_STRING);
-		TIFFSetField(tif, TIFFTAG_MODEL, cam_model.c_str());
+		TIFFSetField(tif, TIFFTAG_MAKE, effective_make.c_str());
+		TIFFSetField(tif, TIFFTAG_MODEL, effective_model.c_str());
 		TIFFSetField(tif, TIFFTAG_DNGVERSION, "\001\001\000\000");
 		TIFFSetField(tif, TIFFTAG_DNGBACKWARDVERSION, "\001\000\000\000");
-		TIFFSetField(tif, TIFFTAG_UNIQUECAMERAMODEL, unique_model.c_str());
+		TIFFSetField(tif, TIFFTAG_UNIQUECAMERAMODEL, effective_unique.c_str());
 		TIFFSetField(tif, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
 		TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, 3);
 		TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
-		TIFFSetField(tif, TIFFTAG_SOFTWARE, "rpicam-still");
+		TIFFSetField(tif, TIFFTAG_SOFTWARE, effective_software.c_str());
+		if (!image_metadata.artist.empty())
+			TIFFSetField(tif, TIFFTAG_ARTIST, image_metadata.artist.c_str());
+		if (!image_metadata.copyright.empty())
+			TIFFSetField(tif, TIFFTAG_COPYRIGHT, image_metadata.copyright.c_str());
 		TIFFSetField(tif, TIFFTAG_COLORMATRIX1, 9, CAM_XYZ.m);
 		TIFFSetField(tif, TIFFTAG_ASSHOTNEUTRAL, 3, NEUTRAL);
 		TIFFSetField(tif, TIFFTAG_CALIBRATIONILLUMINANT1, 21);
 		TIFFSetField(tif, TIFFTAG_SUBIFD, 1, &offset_subifd);
 		TIFFSetField(tif, TIFFTAG_EXIFIFD, offset_exififd);
 
-		// Make a small greyscale thumbnail, just to give some clue what's in here.
-		std::vector<uint8_t> thumb_buf((info.width >> 4) * 3);
+		// Build a small colour thumbnail by demosaicing a downscaled grid and applying a simple gamma curve.
+		std::vector<uint8_t> thumb_row(thumb_width * 3);
+		const int last_row = static_cast<int>(effective_height) - 1;
+		const int last_col = static_cast<int>(effective_width) - 1;
+		double black_base = std::min(std::min(black_levels[0], black_levels[1]),
+									 std::min(black_levels[2], black_levels[3]));
+		double value_range = std::max(1.0, static_cast<double>(white) - black_base);
+		double inv_range = 1.0 / value_range;
 
-		for (unsigned int y = 0; y < (info.height >> 4); y++)
-		{
-			for (unsigned int x = 0; x < (info.width >> 4); x++)
+		auto clamp_coord = [](int value, int max_val) {
+			if (value < 0)
+				return 0;
+			if (value > max_val)
+				return max_val;
+			return value;
+		};
+
+		auto normalized_sample = [&](int row, int col) -> double {
+			int r = clamp_coord(row, last_row);
+			int c = clamp_coord(col, last_col);
+			double sample = static_cast<double>(buf[r * buf_stride_pixels + c]);
+			double normalized = (sample - black_base) * inv_range;
+			return std::clamp(normalized, 0.0, 1.0);
+		};
+
+		auto average = [](std::initializer_list<double> values) -> double {
+			double sum = 0.0;
+			int count = 0;
+			for (double v : values)
 			{
-				unsigned int off = (y * buf_stride_pixels + x) << 4;
-				uint32_t grey =
-					buf[off] + buf[off + 1] + buf[off + buf_stride_pixels] + buf[off + buf_stride_pixels + 1];
-				grey = (grey << 14) >> bayer_format.bits;
-				grey = sqrt((double)grey); // simple "gamma correction"
-				thumb_buf[3 * x] = thumb_buf[3 * x + 1] = thumb_buf[3 * x + 2] = grey;
+				sum += v;
+				count++;
 			}
-			if (TIFFWriteScanline(tif, &thumb_buf[0], y, 0) != 1)
+			return count ? sum / count : 0.0;
+		};
+
+		auto demosaic_pixel = [&](int row, int col, double &r, double &g, double &b) {
+			char colour = bayer_format.order[((row & 1) << 1) | (col & 1)];
+			switch (colour)
+			{
+			case 0: // red
+				r = normalized_sample(row, col);
+				g = average({ normalized_sample(row, col - 1), normalized_sample(row, col + 1),
+							  normalized_sample(row - 1, col), normalized_sample(row + 1, col) });
+				b = average({ normalized_sample(row - 1, col - 1), normalized_sample(row - 1, col + 1),
+							  normalized_sample(row + 1, col - 1), normalized_sample(row + 1, col + 1) });
+				break;
+			case 2: // blue
+				b = normalized_sample(row, col);
+				g = average({ normalized_sample(row, col - 1), normalized_sample(row, col + 1),
+							  normalized_sample(row - 1, col), normalized_sample(row + 1, col) });
+				r = average({ normalized_sample(row - 1, col - 1), normalized_sample(row - 1, col + 1),
+							  normalized_sample(row + 1, col - 1), normalized_sample(row + 1, col + 1) });
+				break;
+			default: // green
+				g = normalized_sample(row, col);
+				bool red_row = (bayer_format.order[((row & 1) << 1)] == 0) ||
+							   (bayer_format.order[(((row & 1) << 1) | 1)] == 0);
+				if (red_row)
+				{
+					r = average({ normalized_sample(row, col - 1), normalized_sample(row, col + 1) });
+					b = average({ normalized_sample(row - 1, col), normalized_sample(row + 1, col) });
+				}
+				else
+				{
+					r = average({ normalized_sample(row - 1, col), normalized_sample(row + 1, col) });
+					b = average({ normalized_sample(row, col - 1), normalized_sample(row, col + 1) });
+				}
+				break;
+			}
+		};
+
+		auto encode_channel = [](double value) -> uint8_t {
+			value = std::clamp(value, 0.0, 1.0);
+			double gamma = std::pow(value, 1.0 / 2.2);
+			int encoded = static_cast<int>(std::lround(gamma * 255.0));
+			return static_cast<uint8_t>(std::clamp(encoded, 0, 255));
+		};
+
+		for (unsigned int y = 0; y < thumb_height; y++)
+		{
+			unsigned int src_y = std::min(effective_height - 1, y * thumbnail_block_size);
+			if (src_y & 1)
+				src_y--;
+			for (unsigned int x = 0; x < thumb_width; x++)
+			{
+				unsigned int src_x = std::min(effective_width - 1, x * thumbnail_block_size);
+				if (src_x & 1)
+					src_x--;
+
+				double r = 0.0, g = 0.0, b = 0.0;
+				demosaic_pixel(static_cast<int>(src_y), static_cast<int>(src_x), r, g, b);
+
+				thumb_row[3 * x] = encode_channel(r);
+				thumb_row[3 * x + 1] = encode_channel(g);
+				thumb_row[3 * x + 2] = encode_channel(b);
+			}
+
+			if (TIFFWriteScanline(tif, thumb_row.data(), y, 0) != 1)
 				throw std::runtime_error("error writing DNG thumbnail data");
+		}
+
+		// Provide explicit offsets for readers that expect JPEG preview metadata.
+		tstrip_t preview_strip = 0;
+		toff_t preview_offset = TIFFGetStrileOffset(tif, preview_strip);
+		tsize_t preview_bytecount = TIFFGetStrileByteCount(tif, preview_strip);
+		if (preview_offset > 0 && preview_bytecount > 0)
+		{
+			TIFFSetField(tif, TIFFTAG_JPEGIFOFFSET, preview_offset);
+			TIFFSetField(tif, TIFFTAG_JPEGIFBYTECOUNT, preview_bytecount);
+			TIFFSetField(tif, TIFFTAG_PREVIEWCOLORSPACE, 2); // sRGB
 		}
 
 		TIFFWriteDirectory(tif);
@@ -512,6 +653,14 @@ void dng_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const
 		TIFFSetField(tif, TIFFTAG_CFAPATTERN, bayer_format.order);
 #endif
 		TIFFSetField(tif, TIFFTAG_WHITELEVEL, 1, &white);
+		TIFFSetField(tif, TIFFTAG_MAKE, effective_make.c_str());
+		TIFFSetField(tif, TIFFTAG_MODEL, effective_model.c_str());
+		TIFFSetField(tif, TIFFTAG_UNIQUECAMERAMODEL, effective_unique.c_str());
+		TIFFSetField(tif, TIFFTAG_SOFTWARE, effective_software.c_str());
+		if (!image_metadata.artist.empty())
+			TIFFSetField(tif, TIFFTAG_ARTIST, image_metadata.artist.c_str());
+		if (!image_metadata.copyright.empty())
+			TIFFSetField(tif, TIFFTAG_COPYRIGHT, image_metadata.copyright.c_str());
 		const uint16_t black_level_repeat_dim[] = { 2, 2 };
 		TIFFSetField(tif, TIFFTAG_BLACKLEVELREPEATDIM, &black_level_repeat_dim);
 		TIFFSetField(tif, TIFFTAG_BLACKLEVEL, 4, &black_levels);

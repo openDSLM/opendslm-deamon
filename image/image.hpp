@@ -17,10 +17,20 @@
 
 struct StillOptions;
 
+struct ImageMetadata
+{
+	std::string make;
+	std::string model;
+	std::string unique_model;
+	std::string software;
+	std::string artist;
+	std::string copyright;
+};
+
 // In jpeg.cpp:
 void jpeg_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const &info,
 			   libcamera::ControlList const &metadata, std::string const &filename, std::string const &cam_model,
-			   StillOptions const *options);
+			   StillOptions const *options, ImageMetadata const &image_metadata);
 
 // In yuv.cpp:
 void yuv_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const &info,
@@ -29,7 +39,7 @@ void yuv_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const
 // In dng.cpp:
 void dng_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const &info,
 			  libcamera::ControlList const &metadata, std::string const &filename, std::string const &cam_model,
-			  StillOptions const *options);
+			  StillOptions const *options, ImageMetadata const &image_metadata);
 
 // In png.cpp:
 void png_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const &info,

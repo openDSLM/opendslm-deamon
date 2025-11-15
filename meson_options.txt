@@ -58,3 +58,18 @@ option('download_imx500_models',
         type : 'boolean',
         value : false,
         description : 'Download and install the IMX500 postprocessing models')
+
+option('metadata_make',
+        type : 'string',
+        value : 'RPI5 (Missuse-ikon 16)',
+        description : 'Default EXIF/TIFF Make string')
+
+option('metadata_model_prefix',
+        type : 'string',
+        value : 'openDSLM',
+        description : 'Default prefix used to build the Model string (Model = "<prefix> (<sensor>)")')
+
+option('metadata_software_name',
+        type : 'string',
+        value : 'openDSLM daemon',
+        description : 'Base name for the Software metadata tag; the project version is appended automatically')

@@ -44,3 +44,7 @@ protected:
 };
 
 Preview *make_preview(Options const *options);
+
+#if GSTREAMER_PRESENT
+std::string preview_gstreamer_socket_path(Preview *preview);
+#endif

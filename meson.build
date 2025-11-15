@@ -1,6 +1,6 @@
-project('oDSLMd-daemon', 'c', 'cpp',
+project('openDSLM', 'c', 'cpp',
         meson_version : '>= 0.64.0',
-        version : '1.0.0',
+        version : '0.1.0 pre-Alpha',
         default_options : [
             'werror=true',
             'warning_level=3',
@@ -15,6 +15,16 @@ fs = import('fs')
 cpp_arguments = ['-pedantic', '-Wno-unused-parameter', '-faligned-new']
 
 cpp_arguments += '-D_FILE_OFFSET_BITS=64'
+
+metadata_conf = configuration_data()
+metadata_conf.set_quoted('ODS_DEFAULT_MAKE', get_option('metadata_make'))
+metadata_conf.set_quoted('ODS_DEFAULT_MODEL_PREFIX', get_option('metadata_model_prefix'))
+metadata_conf.set_quoted('ODS_DEFAULT_SOFTWARE',
+    '@0@ (v@1@)'.format(get_option('metadata_software_name'), meson.project_version()))
+configure_file(
+    input : 'metadata_config.hpp.in',
+    output : 'metadata_config.hpp',
+    configuration : metadata_conf)
 
 cxx = meson.get_compiler('cpp')
 cpu = host_machine.cpu()

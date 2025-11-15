@@ -16,6 +16,7 @@
 #include <string>
 #include <utility>
 #include <cmath>
+#include <cctype>
 
 #include <jpeglib.h>
 #include <libcamera/base/span.h>
@@ -26,7 +27,9 @@
 #include "core/buffer_sync.hpp"
 #include "core/stream_info.hpp"
 #include "encoder/null_encoder.hpp"
+#include "metadata_config.hpp"
 #include "output/dng_output.hpp"
+#include "preview/preview.hpp"
 
 namespace rpicam
 {
@@ -140,7 +143,11 @@ std::vector<uint8_t> encodeFrameToJpeg(libcamera::Span<uint8_t> span, StreamInfo
 
 } // namespace
 
-CameraDaemon::CameraDaemon() {}
+CameraDaemon::CameraDaemon()
+{
+        settings_.metadata.make = ODS_DEFAULT_MAKE;
+        settings_.metadata.software = ODS_DEFAULT_SOFTWARE;
+}
 
 void CameraDaemon::setPreviewPipeline(const std::string &pipeline)
 {
@@ -208,6 +215,12 @@ CameraSettings CameraDaemon::getSettings() const
 {
         std::lock_guard<std::mutex> lock(mutex_);
         return settings_;
+}
+
+std::string CameraDaemon::getLastCameraModel() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_camera_model_;
 }
 
 bool CameraDaemon::updateSettings(JsonObject const &values, std::string &error_message)
@@ -375,6 +388,7 @@ bool CameraDaemon::startSession(SessionMode mode, const std::string &video_path,
                         last_capture_.frames.clear();
                         last_capture_.directory = target_path;
                 }
+                camera_reconfigure_.store(true);
                 return true;
         }
 
@@ -389,6 +403,7 @@ bool CameraDaemon::startSession(SessionMode mode, const std::string &video_path,
                         std::lock_guard<std::mutex> lock(mutex_);
                         session_.active = false;
                         session_.mode = SessionMode::None;
+                        session_.last_error.clear();
                 }
                 error_message.clear();
                 return true;
@@ -427,7 +442,7 @@ std::string CameraDaemon::buildStatusJson() const
              << "\"active\":" << (session_.active ? "true" : "false")
              << ",\"mode\":" << jsonString(modeToString(session_.mode))
              << ",\"last_error\":" << jsonString(session_.last_error)
-             << "},\"settings\":" << buildSettingsJson(settings_)
+             << "},\"settings\":" << buildSettingsJson(settings_, last_camera_model_)
              << ",\"preview_pipeline\":" << jsonString(preview_pipeline_)
              << ",\"preview_client_pipeline\":" << jsonString(preview_client_pipeline_)
              << ",\"last_capture\":";
@@ -439,7 +454,8 @@ std::string CameraDaemon::buildStatusJson() const
         return json.str();
 }
 
-std::string CameraDaemon::buildSettingsJson(CameraSettings const &settings)
+std::string CameraDaemon::buildSettingsJson(CameraSettings const &settings,
+                                            std::string const &camera_model) const
 {
         std::ostringstream json;
         json << "{"
@@ -449,7 +465,33 @@ std::string CameraDaemon::buildSettingsJson(CameraSettings const &settings)
              << ",\"auto_exposure\":" << (settings.auto_exposure ? "true" : "false")
              << ",\"output_dir\":" << jsonString(settings.output_dir)
              << ",\"mode\":" << jsonString(settings.mode)
+             << ",\"metadata\":" << buildMetadataJson(settings, camera_model)
              << "}";
+        return json.str();
+}
+
+std::string CameraDaemon::buildMetadataJson(CameraSettings const &settings,
+                                            std::string const &camera_model) const
+{
+        std::ostringstream json;
+        json << "{"
+             << "\"make\":" << jsonString(settings.metadata.make)
+             << ",\"model\":" << jsonString(settings.metadata.model)
+             << ",\"unique_model\":" << jsonString(settings.metadata.unique_model)
+             << ",\"software\":" << jsonString(settings.metadata.software)
+             << ",\"artist\":" << jsonString(settings.metadata.artist)
+             << ",\"copyright\":" << jsonString(settings.metadata.copyright);
+
+        ImageMetadata effective = resolveMetadataForSensor(camera_model, settings.metadata, nullptr);
+        json << ",\"effective\":{"
+             << "\"make\":" << jsonString(effective.make)
+             << ",\"model\":" << jsonString(effective.model)
+             << ",\"unique_model\":" << jsonString(effective.unique_model)
+             << ",\"software\":" << jsonString(effective.software)
+             << ",\"artist\":" << jsonString(effective.artist)
+             << ",\"copyright\":" << jsonString(effective.copyright)
+             << "}";
+        json << "}";
         return json.str();
 }
 
@@ -513,8 +555,16 @@ CameraDaemon::CaptureResult CameraDaemon::runCineDngCapture(CameraSettings const
                 if (!raw_stream)
                         throw std::runtime_error("Raw stream unavailable - cannot write CinemaDNG");
 
+                std::string camera_model = app.CameraModel();
+                {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        last_camera_model_ = camera_model;
+                }
+                ImageMetadata resolved_metadata =
+                        resolveMetadataForSensor(camera_model, settings.metadata, nullptr);
                 std::unique_ptr<DngOutput> output =
-                        std::make_unique<DngOutput>(options, raw_info, app.CameraModel());
+                        std::make_unique<DngOutput>(options, raw_info, camera_model, resolved_metadata,
+                                                    std::string(), false);
                 output->SetFrameWrittenCallback([&result](std::string const &path) {
                         result.frames.push_back(path);
                 });
@@ -752,6 +802,142 @@ bool CameraDaemon::ensureOutputDirectory(std::string const &path, std::string &e
         return true;
 }
 
+std::string CameraDaemon::makeCaptureDirectory(const std::string &base, const std::string &prefix,
+                                                std::string &error_message)
+{
+        std::filesystem::path base_dir = base.empty() ? std::filesystem::path(".")
+                                                       : std::filesystem::path(base);
+
+        std::error_code ec;
+        if (!std::filesystem::exists(base_dir, ec))
+        {
+                if (!std::filesystem::create_directories(base_dir, ec) && ec)
+                {
+                        error_message = "Failed to create base directory: " + ec.message();
+                        return {};
+                }
+        }
+        else if (!std::filesystem::is_directory(base_dir, ec) || ec)
+        {
+                error_message = "Output directory is not valid";
+                return {};
+        }
+
+        auto now = std::chrono::system_clock::now();
+        std::time_t tt = std::chrono::system_clock::to_time_t(now);
+        std::tm tm {};
+#ifdef _WIN32
+        if (gmtime_s(&tm, &tt) != 0)
+                tm = {};
+#else
+        if (!gmtime_r(&tt, &tm))
+                tm = {};
+#endif
+        std::ostringstream timestamp;
+        timestamp << std::put_time(&tm, "%Y%m%d_%H%M%S");
+        if (!prefix.empty())
+                timestamp << '_' << prefix;
+
+        std::string base_name = timestamp.str();
+        std::filesystem::path candidate = base_dir / base_name;
+
+        std::error_code exists_ec;
+        int suffix = 1;
+        while (std::filesystem::exists(candidate, exists_ec))
+        {
+                if (exists_ec)
+                {
+                        error_message = "Failed to query capture directory: " + exists_ec.message();
+                        return {};
+                }
+                std::ostringstream alt;
+                alt << base_name << '_' << std::setfill('0') << std::setw(2) << suffix++;
+                candidate = base_dir / alt.str();
+                exists_ec.clear();
+        }
+
+        if (!std::filesystem::create_directories(candidate, ec) && ec)
+        {
+                error_message = "Failed to create capture directory: " + ec.message();
+                return {};
+        }
+
+        return candidate.string();
+}
+
+bool CameraDaemon::applyMetadataPatch(JsonObject const &values, MetadataSettings &target,
+                                      std::string &error_message, bool &any) const
+{
+        any = false;
+        for (auto const &[key, value] : values)
+        {
+                auto text = value.asString();
+                if (!text)
+                {
+                        error_message = "Field '" + key + "' must be a string";
+                        return false;
+                }
+
+                if (key == "make")
+                        target.make = *text;
+                else if (key == "model")
+                        target.model = *text;
+                else if (key == "unique_model")
+                        target.unique_model = *text;
+                else if (key == "software")
+                        target.software = *text;
+                else if (key == "artist")
+                        target.artist = *text;
+                else if (key == "copyright")
+                        target.copyright = *text;
+                else
+                {
+                        error_message = "Unknown metadata field: " + key;
+                        return false;
+                }
+                any = true;
+        }
+        return true;
+}
+
+ImageMetadata CameraDaemon::resolveMetadataForSensor(std::string const &camera_model,
+                                                    MetadataSettings const &base,
+                                                    MetadataSettings const *override_settings) const
+{
+        MetadataSettings effective = base;
+        if (override_settings)
+        {
+                if (!override_settings->make.empty())
+                        effective.make = override_settings->make;
+                if (!override_settings->model.empty())
+                        effective.model = override_settings->model;
+                if (!override_settings->unique_model.empty())
+                        effective.unique_model = override_settings->unique_model;
+                if (!override_settings->software.empty())
+                        effective.software = override_settings->software;
+                if (!override_settings->artist.empty())
+                        effective.artist = override_settings->artist;
+                if (!override_settings->copyright.empty())
+                        effective.copyright = override_settings->copyright;
+        }
+
+        std::string sensor_label = camera_model.empty() ? "Unknown Sensor" : camera_model;
+        ImageMetadata resolved;
+        resolved.make = effective.make.empty() ? std::string(ODS_DEFAULT_MAKE) : effective.make;
+        resolved.model = effective.model.empty()
+                ? (std::string(ODS_DEFAULT_MODEL_PREFIX) + " (" + sensor_label + ")")
+                : effective.model;
+        resolved.unique_model = effective.unique_model.empty()
+                ? (resolved.make + " " + resolved.model)
+                : effective.unique_model;
+        resolved.software = effective.software.empty()
+                ? std::string(ODS_DEFAULT_SOFTWARE)
+                : effective.software;
+        resolved.artist = effective.artist;
+        resolved.copyright = effective.copyright;
+        return resolved;
+}
+
 void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoOptions &options, bool request_raw)
 {
         options.timeout.value = std::chrono::nanoseconds(0);
@@ -767,8 +953,8 @@ void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoO
         options.info_text.clear();
         options.width = 0;
         options.height = 0;
-        options.viewfinder_width = 0;
-        options.viewfinder_height = 0;
+        options.viewfinder_width = 640;
+        options.viewfinder_height = 480;
         options.lores_width = 0;
         options.lores_height = 0;
         options.lores_par = false;
@@ -903,7 +1089,8 @@ void CameraDaemon::registerRoutes()
         server_.addHandler("GET", "/settings", [this](HttpRequest const &) {
                 HttpResponse response;
                 CameraSettings settings = getSettings();
-                response.body = buildSettingsJson(settings);
+                std::string camera_model = getLastCameraModel();
+                response.body = buildSettingsJson(settings, camera_model);
                 return response;
         });
 
@@ -918,17 +1105,67 @@ void CameraDaemon::registerRoutes()
                         return response;
                 }
                 camera_reconfigure_.store(true);
-                response.body = buildSettingsJson(getSettings());
+                CameraSettings settings = getSettings();
+                std::string camera_model = getLastCameraModel();
+                response.body = buildSettingsJson(settings, camera_model);
                 return response;
         });
 
-        server_.addHandler("POST", "/capture/still", [this](HttpRequest const &) {
+        server_.addHandler("GET", "/metadata", [this](HttpRequest const &) {
                 HttpResponse response;
+                CameraSettings settings = getSettings();
+                std::string camera_model = getLastCameraModel();
+                response.body = buildMetadataJson(settings, camera_model);
+                return response;
+        });
+
+        server_.addHandler("POST", "/metadata", [this](HttpRequest const &request) {
+                HttpResponse response;
+                std::string error;
+                JsonObject values = parseJsonObject(request.body);
+                if (!updateMetadata(values, error))
+                {
+                        response.status_code = 400;
+                        response.body = "{\"error\":" + jsonString(error) + "}";
+                        return response;
+                }
+                CameraSettings settings = getSettings();
+                std::string camera_model = getLastCameraModel();
+                response.body = buildMetadataJson(settings, camera_model);
+                return response;
+        });
+
+        server_.addHandler("POST", "/capture/still", [this](HttpRequest const &request) {
+                HttpResponse response;
+                std::optional<MetadataSettings> metadata_override;
+                if (!request.body.empty())
+                {
+                        JsonObject values = parseJsonObject(request.body);
+                        if (!values.empty())
+                        {
+                                std::string error;
+                                MetadataSettings parsed;
+                                bool any = false;
+                                if (!applyMetadataPatch(values, parsed, error, any))
+                                {
+                                        response.status_code = 400;
+                                        response.body = "{\"error\":" + jsonString(error) + "}";
+                                        return response;
+                                }
+                                if (any)
+                                        metadata_override = parsed;
+                        }
+                }
                 // Arm a one-shot still capture via the background camera loop.
                 {
                         std::lock_guard<std::mutex> lock(capture_mutex_);
                         still_result_.clear();
                         still_pending_ = true;
+                        if (metadata_override)
+                        {
+                                still_metadata_override_ = *metadata_override;
+                                still_metadata_override_pending_ = true;
+                        }
                 }
 
                 // Wait for one frame to be written (with a timeout).
@@ -1109,6 +1346,18 @@ void CameraDaemon::cameraLoop()
                         CameraSettings settings = getSettings();
                         applySettingsToOptions(settings, *options, true /* request raw */);
 
+                std::string dng_output = settings.output_dir;
+                {
+                        std::lock_guard<std::mutex> lock(capture_mutex_);
+                        if (video_recording_ && !video_sequence_path_.empty())
+                        {
+                                std::filesystem::path clip_dir(video_sequence_path_);
+                                dng_output = (clip_dir / "frame-%08u.dng").string();
+                        }
+                }
+                options->output = dng_output;
+                LOG(1, "Configuring DNG output path: " << options->output);
+
                         // Set callbacks that forward to an active DNG writer when present
                         app.SetEncodeOutputReadyCallback([this](void *mem, size_t size, int64_t ts, bool key) {
                                 std::shared_ptr<DngOutput> out;
@@ -1141,6 +1390,50 @@ void CameraDaemon::cameraLoop()
                         if (!previewClientPipelineExplicit())
                         {
                                 std::string pipeline = previewClientPipeline();
+                                bool updated = false;
+
+#ifdef GSTREAMER_PRESENT
+                                auto replace_socket_path = [](std::string &text, const std::string &path) -> bool {
+                                        static constexpr char kSocketToken[] = "socket-path=";
+                                        std::size_t pos = text.find(kSocketToken);
+                                        if (pos == std::string::npos)
+                                                return false;
+                                        pos += sizeof(kSocketToken) - 1;
+                                        std::size_t value_start = pos;
+                                        bool quoted = value_start < text.size() && text[value_start] == '"';
+                                        std::size_t value_end = value_start;
+                                        if (quoted)
+                                        {
+                                                ++value_start;
+                                                value_end = value_start;
+                                                while (value_end < text.size() && text[value_end] != '"')
+                                                        ++value_end;
+                                                if (value_end >= text.size())
+                                                        return false;
+                                                if (text.compare(value_start, value_end - value_start, path) == 0)
+                                                        return false;
+                                                text.replace(value_start, value_end - value_start, path);
+                                        }
+                                        else
+                                        {
+                                                while (value_end < text.size() &&
+                                                       !std::isspace(static_cast<unsigned char>(text[value_end])) &&
+                                                       text[value_end] != '!')
+                                                        ++value_end;
+                                                if (text.compare(value_start, value_end - value_start, path) == 0)
+                                                        return false;
+                                                text.replace(value_start, value_end - value_start, path);
+                                        }
+                                        std::cerr << "[daemon] replace socket-path => " << path << std::endl;
+                                        return true;
+                                };
+
+                                std::string socket_path = preview_gstreamer_socket_path(app.GetPreview());
+                                std::cerr << "[daemon] detected preview socket path: " << socket_path << std::endl;
+                                if (!socket_path.empty())
+                                        updated |= replace_socket_path(pipeline, socket_path);
+#endif
+
                                 if (!pipeline.empty())
                                 {
                                         static constexpr char kCapsToken[] = "video/x-raw,format=RGBA";
@@ -1161,14 +1454,14 @@ void CameraDaemon::cameraLoop()
                                                         std::size_t pos = text.find(token);
                                                         while (pos != std::string::npos)
                                                         {
-                                                                std::size_t end = text.find(',', pos + 1);
-                                                                if (end == std::string::npos)
-                                                                {
-                                                                        text.erase(pos);
-                                                                        break;
-                                                                }
-                                                                text.erase(pos, end - pos);
-                                                                pos = text.find(token, pos);
+                                                std::size_t end = text.find(',', pos + 1);
+                                                if (end == std::string::npos)
+                                                {
+                                                        text.erase(pos);
+                                                        break;
+                                                }
+                                                text.erase(pos, end - pos);
+                                                pos = text.find(token, pos);
                                                         }
                                                 };
 
@@ -1196,9 +1489,15 @@ void CameraDaemon::cameraLoop()
                                                 if (current_segment != new_segment)
                                                 {
                                                         pipeline.replace(caps_idx, caps_end - caps_idx, new_segment);
-                                                        setPreviewClientPipeline(pipeline, false);
+                                                        updated = true;
                                                 }
                                         }
+                                }
+
+                                if (updated)
+                                {
+                                        std::cerr << "[daemon] updated preview client pipeline: " << pipeline << std::endl;
+                                        setPreviewClientPipeline(pipeline, false);
                                 }
                         }
 
@@ -1219,7 +1518,7 @@ void CameraDaemon::cameraLoop()
                                         std::lock_guard<std::mutex> lock(capture_mutex_);
                                         if (still_pending_)
                                         {
-                                                still_result_.push_back(path);
+                                                still_result_.push_back(final_path);
                                                 still_pending_ = false;
                                                 still_cv_.notify_all();
                                         }
@@ -1227,10 +1526,16 @@ void CameraDaemon::cameraLoop()
                                         {
                                                 std::lock_guard<std::mutex> lock2(mutex_);
                                                 last_capture_.type = "video";
-                                                last_capture_.frames.push_back(path);
+                                                last_capture_.frames.push_back(final_path);
+                                                last_capture_.directory =
+                                                        clip_directory.empty() ? video_sequence_path_ : clip_directory;
                                         }
                                 });
-                                active_output_ = std::move(out);
+                                {
+                                        std::lock_guard<std::mutex> lock(capture_mutex_);
+                                        if (!active_output_)
+                                                active_output_ = std::move(out);
+                                }
                         };
 
                         app.StartEncoder();
@@ -1278,22 +1583,16 @@ void CameraDaemon::cameraLoop()
 
                                 // Handle capturing frames to DNG when requested
                                 bool need_output = false;
-                                bool keep_output = false;
                                 {
                                         std::lock_guard<std::mutex> lock(capture_mutex_);
                                         need_output = video_recording_ || still_pending_;
-                                        keep_output = video_recording_;
-                                        if (need_output && !active_output_)
-                                                ensure_output();
+                                        if (!need_output && active_output_)
+                                                active_output_.reset();
                                 }
                                 if (need_output)
-                                        app.EncodeBuffer(completed_request, rstream);
-                                else
                                 {
-                                        // Drop any active output if not recording
-                                        std::lock_guard<std::mutex> lock(capture_mutex_);
-                                        if (active_output_ && !keep_output)
-                                                active_output_.reset();
+                                        ensure_output();
+                                        app.EncodeBuffer(completed_request, rstream);
                                 }
                         }
 

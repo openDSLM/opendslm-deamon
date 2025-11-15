@@ -16,11 +16,22 @@
 #include "core/video_options.hpp"
 #include "daemon/json_utils.hpp"
 #include "daemon/simple_http.hpp"
+#include "image/image.hpp"
 
 class DngOutput; // forward declaration
 
 namespace rpicam
 {
+
+struct MetadataSettings
+{
+        std::string make;
+        std::string model;
+        std::string unique_model;
+        std::string software;
+        std::string artist;
+        std::string copyright;
+};
 
 struct CameraSettings
 {
@@ -30,6 +41,7 @@ struct CameraSettings
         bool auto_exposure = true;
         std::string output_dir = "/ssd/RAW";
         std::string mode;
+        MetadataSettings metadata;
 };
 
 enum class SessionMode
@@ -63,8 +75,10 @@ public:
 
         SessionState getState() const;
         CameraSettings getSettings() const;
+        std::string getLastCameraModel() const;
 
         bool updateSettings(JsonObject const &values, std::string &error_message);
+        bool updateMetadata(JsonObject const &values, std::string &error_message);
         void setPreviewPipeline(const std::string &pipeline);
         void setPreviewClientPipeline(const std::string &pipeline, bool explicit_value);
         std::string previewPipeline() const;
@@ -84,7 +98,8 @@ private:
         };
 
         std::string buildStatusJson() const;
-        static std::string buildSettingsJson(CameraSettings const &settings);
+        std::string buildSettingsJson(CameraSettings const &settings, std::string const &camera_model) const;
+        std::string buildMetadataJson(CameraSettings const &settings, std::string const &camera_model) const;
         static std::string modeToString(SessionMode mode);
         static std::string buildCaptureJson(CaptureSummary const &capture);
 
@@ -97,6 +112,10 @@ private:
                                            bool request_raw);
         static std::string makeCaptureDirectory(const std::string &base, const std::string &prefix,
                                                 std::string &error_message);
+        bool applyMetadataPatch(JsonObject const &values, MetadataSettings &target, std::string &error_message,
+                                bool &any) const;
+        ImageMetadata resolveMetadataForSensor(std::string const &camera_model, MetadataSettings const &base,
+                                               MetadataSettings const *override_settings) const;
 
         void registerRoutes();
         // Unified background camera loop
@@ -111,6 +130,7 @@ private:
         CameraSettings settings_;
         SessionState session_;
         CaptureSummary last_capture_;
+        std::string last_camera_model_;
         std::string preview_pipeline_;
         std::string preview_client_pipeline_;
         bool preview_client_pipeline_explicit_ = false;
@@ -138,6 +158,8 @@ private:
         std::vector<std::string> still_result_;
         std::condition_variable still_cv_;
         std::string video_sequence_path_;
+        MetadataSettings still_metadata_override_;
+        bool still_metadata_override_pending_ = false;
 };
 
 } // namespace rpicam

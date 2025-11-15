@@ -81,11 +81,14 @@ needed). `last_capture` becomes a structure such as
 {
   "type": "still",
   "frames": ["/ssd/RAW/frame-00000000.dng"],
-  "count": 1
+  "count": 1,
+  "directory": "/ssd/RAW/20240101_120000_still"
 }
 ```
 
-whenever a capture finishes successfully.
+whenever a capture finishes successfully. Video recordings keep appending frame
+paths to the same `frames` array while exposing the active clip directory via
+`directory`.
 
 ### `GET /settings`
 
@@ -135,7 +138,24 @@ A HTTP 409 is returned if another session is already active.
 ### `POST /recordings/video`
 
 Starts a CinemaDNG video recording that runs until it is explicitly stopped.
-The response contains the updated daemon status.
+The daemon captures the sequence internally, allowing considerably higher
+frame rates than issuing single-shot requests from the UI.
+
+An optional JSON body may provide a destination folder name. Relative entries
+are created inside the current `output_dir`; absolute paths are honoured as-is.
+
+```json
+{"directory": "20240520_clip"}
+```
+
+```json
+{"folder_name": "custom_clip"}
+```
+
+If no folder name is supplied, the daemon creates a timestamped directory using
+the configured `output_dir`. The response contains the updated daemon status
+with `state.mode` set to `video`.
+For convenience the same field may be supplied as `folder` or `folder_name`.
 
 ### `DELETE /recordings/video`
 

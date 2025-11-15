@@ -13,8 +13,11 @@
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
 #include <gst/video/video.h>
+#include <gst/video/video-info.h>
 
 #include <glib.h>
+#include <filesystem>
+#include <system_error>
 
 #include "core/logging.hpp"
 #include "core/options.hpp"
@@ -53,16 +56,20 @@ public:
                 w = 0;
                 h = 0;
         }
+        const std::string &SocketPath() const { return socket_path_; }
+        void RefreshSocketPath() { updateSocketPath(); }
 
 private:
         void configureCaps(StreamInfo const &info);
         void drainBus();
         void ensurePlaying();
+        void updateSocketPath();
 
         GstElement *pipeline_ = nullptr;
         GstAppSrc *appsrc_ = nullptr;
         GstBus *bus_ = nullptr;
         GstCaps *caps_ = nullptr;
+        GstElement *sink_ = nullptr;
         GstVideoInfo video_info_ {};
         StreamInfo current_info_ {};
         bool have_info_ = false;
@@ -70,6 +77,7 @@ private:
         GstClockTime timestamp_ = 0;
         GstClockTime frame_duration_ = GST_CLOCK_TIME_NONE;
         std::string pipeline_desc_;
+        std::string socket_path_;
 };
 
 void init_gstreamer()
@@ -130,6 +138,28 @@ GstPreview::GstPreview(Options const *options) : Preview(options)
 
         bus_ = gst_element_get_bus(pipeline_);
 
+        if (!sink_)
+        {
+                GstIterator *it = gst_bin_iterate_sinks(GST_BIN(pipeline_));
+                if (it)
+                {
+                        GValue item = G_VALUE_INIT;
+                        while (gst_iterator_next(it, &item) == GST_ITERATOR_OK)
+                        {
+                                GstElement *candidate = GST_ELEMENT(g_value_get_object(&item));
+                                if (candidate
+                                    && g_object_class_find_property(G_OBJECT_GET_CLASS(candidate), "socket-path"))
+                                {
+                                        sink_ = GST_ELEMENT(gst_object_ref(candidate));
+                                        g_value_reset(&item);
+                                        break;
+                                }
+                                g_value_reset(&item);
+                        }
+                        gst_iterator_free(it);
+                }
+        }
+
         gst_app_src_set_stream_type(appsrc_, GST_APP_STREAM_TYPE_STREAM);
         gst_app_src_set_max_bytes(appsrc_, 0); // unlimited buffer, rely on downstream for flow control
         g_object_set(G_OBJECT(appsrc_),
@@ -145,6 +175,8 @@ GstPreview::GstPreview(Options const *options) : Preview(options)
 
         if (gst_element_set_state(pipeline_, GST_STATE_READY) == GST_STATE_CHANGE_FAILURE)
                 throw std::runtime_error("Failed to set GStreamer pipeline to READY state");
+
+        updateSocketPath();
 }
 
 GstPreview::~GstPreview()
@@ -161,6 +193,8 @@ GstPreview::~GstPreview()
                 gst_object_unref(bus_);
         if (appsrc_)
                 gst_object_unref(appsrc_);
+        if (sink_)
+                gst_object_unref(sink_);
         if (pipeline_)
                 gst_object_unref(pipeline_);
 }
@@ -206,6 +240,7 @@ void GstPreview::ensurePlaying()
 
         needs_playing_ = false;
         timestamp_ = 0;
+        updateSocketPath();
 }
 
 void GstPreview::drainBus()
@@ -322,8 +357,24 @@ void GstPreview::Reset()
         gst_app_src_end_of_stream(appsrc_);
         drainBus();
         gst_element_set_state(pipeline_, GST_STATE_READY);
+        updateSocketPath();
         needs_playing_ = true;
         timestamp_ = 0;
+}
+
+void GstPreview::updateSocketPath()
+{
+        if (!sink_)
+                return;
+
+        gchar *path = nullptr;
+        g_object_get(G_OBJECT(sink_), "socket-path", &path, nullptr);
+        if (path)
+        {
+                socket_path_ = path;
+                std::cerr << "[preview] sink socket-path now: " << socket_path_ << std::endl;
+                g_free(path);
+        }
 }
 
 } // namespace
@@ -331,6 +382,72 @@ void GstPreview::Reset()
 Preview *make_gstreamer_preview(Options const *options)
 {
         return new GstPreview(options);
+}
+
+std::string preview_gstreamer_socket_path(Preview *preview)
+{
+        auto gst = dynamic_cast<GstPreview *>(preview);
+        if (!gst)
+                return {};
+        gst->RefreshSocketPath();
+        auto path = gst->SocketPath();
+        std::cerr << "[preview] initial path: " << path << std::endl;
+        auto is_socket = [](const std::string &candidate) -> bool {
+                if (candidate.empty())
+                        return false;
+                std::error_code ec;
+                auto st = std::filesystem::status(candidate, ec);
+                if (ec)
+                        return false;
+                return st.type() == std::filesystem::file_type::socket;
+        };
+
+        // First prefer suffixed sockets if present.
+        for (int i = 0; i < 8; ++i)
+        {
+                std::string candidate = path + "." + std::to_string(i);
+                if (is_socket(candidate))
+                {
+                        std::cerr << "[preview] using suffixed path: " << candidate << std::endl;
+                        return candidate;
+                }
+        }
+
+        if (is_socket(path))
+        {
+                std::cerr << "[preview] using direct path: " << path << std::endl;
+                return path;
+        }
+
+        std::filesystem::path base(path);
+        auto dir = base.parent_path();
+        auto stem = base.filename().string();
+        if (!stem.empty())
+        {
+                std::error_code ec;
+                if (dir.empty())
+                        dir = ".";
+                if (std::filesystem::exists(dir, ec) && !ec)
+                {
+                        for (auto const &entry : std::filesystem::directory_iterator(dir, ec))
+                        {
+                                if (ec)
+                                        break;
+                                if (entry.is_socket(ec) && !ec)
+                                {
+                                        auto name = entry.path().filename().string();
+                                        if (name.rfind(stem, 0) == 0)
+                                        {
+                                                std::cerr << "[preview] using directory match: " << entry.path() << std::endl;
+                                                return entry.path().string();
+                                        }
+                                }
+                        }
+                }
+        }
+
+        std::cerr << "[preview] falling back to original path: " << path << std::endl;
+        return path;
 }
 
 #endif // GSTREAMER_PRESENT
