@@ -317,23 +317,7 @@ bool CameraDaemon::updateSettings(JsonObject const &values, std::string &error_m
         return true;
 }
 
-bool CameraDaemon::updateMetadata(JsonObject const &values, std::string &error_message)
-{
-        std::lock_guard<std::mutex> lock(mutex_);
-        MetadataSettings updated = settings_.metadata;
-        bool any = false;
-        if (!applyMetadataPatch(values, updated, error_message, any))
-                return false;
-        if (!any)
-        {
-                error_message = "No metadata fields provided";
-                return false;
-        }
-        settings_.metadata = updated;
-        return true;
-}
-
-bool CameraDaemon::startSession(SessionMode mode, std::string &error_message, std::optional<std::string> directory)
+bool CameraDaemon::startSession(SessionMode mode, const std::string &video_path, std::string &error_message)
 {
         if (mode == SessionMode::Still)
         {
@@ -365,39 +349,24 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message, st
 
         if (mode == SessionMode::Video)
         {
-                CameraSettings current = getSettings();
-                std::string resolved_directory;
-                if (directory && !directory->empty())
+                std::string target_path = video_path;
+                if (target_path.empty())
                 {
-                        std::filesystem::path provided(*directory);
-                        if (provided.is_relative())
-                        {
-                                std::filesystem::path base = current.output_dir.empty()
-                                        ? std::filesystem::path(".")
-                                        : std::filesystem::path(current.output_dir);
-                                provided = (base / provided).lexically_normal();
-                        }
-                        resolved_directory = provided.string();
-                }
-                else
-                {
-                        std::string dir_error;
-                        resolved_directory = makeCaptureDirectory(current.output_dir, "clip", dir_error);
-                        if (resolved_directory.empty())
-                        {
-                                error_message = dir_error.empty() ? "Failed to prepare video directory" : dir_error;
-                                return false;
-                        }
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        target_path = settings_.output_dir;
                 }
 
-                if (!resolved_directory.empty())
+                if (target_path.empty())
                 {
-                        std::string ensure_error;
-                        if (!ensureOutputDirectory(resolved_directory, ensure_error))
-                        {
-                                error_message = ensure_error.empty() ? "Failed to prepare video directory" : ensure_error;
-                                return false;
-                        }
+                        error_message = "No output directory configured for video capture";
+                        return false;
+                }
+
+                std::string ensure_error;
+                if (!ensureOutputDirectory(target_path, ensure_error))
+                {
+                        error_message = ensure_error;
+                        return false;
                 }
 
                 {
@@ -408,8 +377,7 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message, st
                                 return false;
                         }
                         video_recording_ = true;
-                        video_sequence_path_ = resolved_directory;
-                        active_output_.reset();
+                        video_sequence_path_ = target_path;
                 }
                 {
                         std::lock_guard<std::mutex> lock(mutex_);
@@ -418,7 +386,7 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message, st
                         session_.last_error.clear();
                         last_capture_.type = "video";
                         last_capture_.frames.clear();
-                        last_capture_.directory = resolved_directory;
+                        last_capture_.directory = target_path;
                 }
                 camera_reconfigure_.store(true);
                 return true;
@@ -429,7 +397,6 @@ bool CameraDaemon::startSession(SessionMode mode, std::string &error_message, st
                 {
                         std::lock_guard<std::mutex> lock(capture_mutex_);
                         video_recording_ = false;
-                        active_output_.reset();
                         video_sequence_path_.clear();
                 }
                 {
@@ -456,7 +423,6 @@ bool CameraDaemon::stopSession(std::string &error_message)
                         return false;
                 }
                 video_recording_ = false;
-                active_output_.reset();
                 video_sequence_path_.clear();
         }
         {
@@ -1066,7 +1032,34 @@ void CameraDaemon::registerRoutes()
                         return response;
                 }
 
-                if (!startSession(mode, error))
+                std::string video_path;
+                if (auto it_path = values.find("path"); it_path != values.end())
+                {
+                        auto path_value = it_path->second.asString();
+                        if (!path_value)
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":\"path must be a string\"}";
+                                return response;
+                        }
+                        video_path = *path_value;
+                }
+                if (video_path.empty())
+                {
+                        if (auto it_dir = values.find("directory"); it_dir != values.end())
+                        {
+                                auto dir_value = it_dir->second.asString();
+                                if (!dir_value)
+                                {
+                                        response.status_code = 400;
+                                        response.body = "{\"error\":\"directory must be a string\"}";
+                                        return response;
+                                }
+                                video_path = *dir_value;
+                        }
+                }
+
+                if (!startSession(mode, video_path, error))
                 {
                         response.status_code = 409;
                         if (!error.empty())
@@ -1212,57 +1205,51 @@ void CameraDaemon::registerRoutes()
                 return response;
         });
 
-server_.addHandler("POST", "/recordings/video", [this](HttpRequest const &request) {
+        server_.addHandler("POST", "/recordings/video", [this](HttpRequest const &request) {
                 HttpResponse response;
-                std::optional<std::string> directory;
-                if (!request.body.empty())
+                JsonObject values = parseJsonObject(request.body);
+                std::string directory;
+                if (auto it_path = values.find("path"); it_path != values.end())
                 {
-                        JsonObject values = parseJsonObject(request.body);
-                        JsonValue const *value = nullptr;
-                        const char *field_name = nullptr;
-                        if (auto it = values.find("directory"); it != values.end())
+                        auto path_value = it_path->second.asString();
+                        if (!path_value)
                         {
-                                field_name = "directory";
-                                value = &it->second;
+                                response.status_code = 400;
+                                response.body = "{\"error\":\"path must be a string\"}";
+                                return response;
                         }
-                        else if (auto it = values.find("folder"); it != values.end())
+                        directory = *path_value;
+                }
+                if (directory.empty())
+                {
+                        if (auto it_dir = values.find("directory"); it_dir != values.end())
                         {
-                                field_name = "folder";
-                                value = &it->second;
-                        }
-                        else if (auto it = values.find("folder_name"); it != values.end())
-                        {
-                                field_name = "folder_name";
-                                value = &it->second;
-                        }
-
-                        if (value)
-                        {
-                                auto dir = value->asString();
-                                if (!dir)
+                                auto dir_value = it_dir->second.asString();
+                                if (!dir_value)
                                 {
                                         response.status_code = 400;
-                                        response.body = std::string("{\"error\":\"") + field_name + " must be a string\"}";
+                                        response.body = "{\"error\":\"directory must be a string\"}";
                                         return response;
                                 }
-                                if (dir->empty())
-                                {
-                                        response.status_code = 400;
-                                        response.body = std::string("{\"error\":\"") + field_name + " must be non-empty\"}";
-                                        return response;
-                                }
-                                directory = *dir;
+                                directory = *dir_value;
                         }
                 }
 
+                if (directory.empty())
+                {
+                        response.status_code = 400;
+                        response.body = "{\"error\":\"Missing field: path\"}";
+                        return response;
+                }
+
                 std::string error;
-                if (!startSession(SessionMode::Video, error, directory))
+                if (!startSession(SessionMode::Video, directory, error))
                 {
                         response.status_code = 409;
                         if (!error.empty())
                                 response.body = "{\"error\":" + jsonString(error) + "}";
                         else
-                                response.body = "{\"error\":\"Failed to start video session\"}";
+                                response.body = "{\"error\":\"Failed to start video recording\"}";
                         return response;
                 }
 
@@ -1270,16 +1257,13 @@ server_.addHandler("POST", "/recordings/video", [this](HttpRequest const &reques
                 return response;
         });
 
-server_.addHandler("DELETE", "/recordings/video", [this](HttpRequest const &) {
+        server_.addHandler("DELETE", "/recordings/video", [this](HttpRequest const &) {
                 HttpResponse response;
                 std::string error;
                 if (!stopSession(error))
                 {
                         response.status_code = 409;
-                        if (!error.empty())
-                                response.body = "{\"error\":" + jsonString(error) + "}";
-                        else
-                                response.body = "{\"error\":\"No active video session\"}";
+                        response.body = "{\"error\":" + jsonString(error) + "}";
                         return response;
                 }
                 response.body = buildStatusJson();
@@ -1524,54 +1508,13 @@ void CameraDaemon::cameraLoop()
 
                         // Prepare DNG writer creation lambda
                         auto ensure_output = [this, options, &rinfo, &app]() {
-                                std::string clip_directory;
-                                std::string override_pattern;
-                                bool recording = false;
-                                std::optional<MetadataSettings> still_override;
-                                {
-                                        std::lock_guard<std::mutex> lock(capture_mutex_);
-                                        if (active_output_)
-                                                return;
-                                        recording = video_recording_;
-                                        if (recording && !video_sequence_path_.empty())
-                                        {
-                                                clip_directory = video_sequence_path_;
-                                                override_pattern =
-                                                        (std::filesystem::path(clip_directory) / "frame-%08u.dng")
-                                                                .string();
-                                        }
-                                        if (!recording && still_metadata_override_pending_)
-                                        {
-                                                still_override = still_metadata_override_;
-                                                still_metadata_override_pending_ = false;
-                                        }
-                                }
-
-                                if (recording && !override_pattern.empty())
-                                        LOG(1, "Instantiating video DNG writer: " << override_pattern);
-                                else if (recording)
-                                        LOG(1, "Instantiating video DNG writer without clip directory, using "
-                                                        << options->output);
-                                else
-                                        LOG(2, "Instantiating still DNG writer: " << options->output);
-
-                                bool reset_index = recording;
-                                std::string camera_model = app.CameraModel();
-                                MetadataSettings base_metadata;
-                                {
-                                        std::lock_guard<std::mutex> lock(mutex_);
-                                        base_metadata = settings_.metadata;
-                                        last_camera_model_ = camera_model;
-                                }
-                                ImageMetadata resolved_metadata =
-                                        resolveMetadataForSensor(camera_model, base_metadata,
-                                                                 still_override ? &*still_override : nullptr);
-                                auto out = std::make_shared<DngOutput>(options, rinfo, camera_model,
-                                                                        resolved_metadata, override_pattern,
-                                                                        reset_index);
-                                out->SetFrameWrittenCallback([this, clip_directory](std::string const &path) {
-                                        std::string final_path = path;
-
+                                if (active_output_)
+                                        return;
+                                std::string override_pattern = video_sequence_path_.empty() ? options->output
+                                                                                            : video_sequence_path_;
+                                auto out = std::make_shared<DngOutput>(options, rinfo, app.CameraModel(),
+                                                                       override_pattern);
+                                out->SetFrameWrittenCallback([this](std::string const &path) {
                                         std::lock_guard<std::mutex> lock(capture_mutex_);
                                         if (still_pending_)
                                         {
