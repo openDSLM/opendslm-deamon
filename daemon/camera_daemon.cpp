@@ -777,7 +777,7 @@ bool CameraDaemon::ensureOutputDirectory(std::string const &path, std::string &e
 std::string CameraDaemon::makeCaptureDirectory(const std::string &base, const std::string &prefix,
                                                 std::string &error_message)
 {
-        std::filesystem::path base_dir = base.empty() ? std::filesystem::path('.')
+        std::filesystem::path base_dir = base.empty() ? std::filesystem::path(".")
                                                        : std::filesystem::path(base);
 
         std::error_code ec;
@@ -1100,7 +1100,6 @@ server_.addHandler("DELETE", "/recordings/video", [this](HttpRequest const &) {
                 return response;
         });
 
-        server_.addHandler("GET", "/preview", [this](HttpRequest const &) {
         server_.addHandler("GET", "/preview", [this](HttpRequest const &) {
                 PreviewSubscription preview_client(preview_clients_, preview_enabled_);
                 HttpResponse response;
