@@ -27,6 +27,7 @@
 #include "core/buffer_sync.hpp"
 #include "core/stream_info.hpp"
 #include "encoder/null_encoder.hpp"
+#include "metadata_config.hpp"
 #include "output/dng_output.hpp"
 #include "preview/preview.hpp"
 
@@ -142,7 +143,11 @@ std::vector<uint8_t> encodeFrameToJpeg(libcamera::Span<uint8_t> span, StreamInfo
 
 } // namespace
 
-CameraDaemon::CameraDaemon() {}
+CameraDaemon::CameraDaemon()
+{
+        settings_.metadata.make = ODS_DEFAULT_MAKE;
+        settings_.metadata.software = ODS_DEFAULT_SOFTWARE;
+}
 
 void CameraDaemon::setPreviewPipeline(const std::string &pipeline)
 {
@@ -210,6 +215,12 @@ CameraSettings CameraDaemon::getSettings() const
 {
         std::lock_guard<std::mutex> lock(mutex_);
         return settings_;
+}
+
+std::string CameraDaemon::getLastCameraModel() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_camera_model_;
 }
 
 bool CameraDaemon::updateSettings(JsonObject const &values, std::string &error_message)
@@ -303,6 +314,22 @@ bool CameraDaemon::updateSettings(JsonObject const &values, std::string &error_m
 
         settings_ = updated;
         session_.last_error.clear();
+        return true;
+}
+
+bool CameraDaemon::updateMetadata(JsonObject const &values, std::string &error_message)
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        MetadataSettings updated = settings_.metadata;
+        bool any = false;
+        if (!applyMetadataPatch(values, updated, error_message, any))
+                return false;
+        if (!any)
+        {
+                error_message = "No metadata fields provided";
+                return false;
+        }
+        settings_.metadata = updated;
         return true;
 }
 
@@ -449,7 +476,7 @@ std::string CameraDaemon::buildStatusJson() const
              << "\"active\":" << (session_.active ? "true" : "false")
              << ",\"mode\":" << jsonString(modeToString(session_.mode))
              << ",\"last_error\":" << jsonString(session_.last_error)
-             << "},\"settings\":" << buildSettingsJson(settings_)
+             << "},\"settings\":" << buildSettingsJson(settings_, last_camera_model_)
              << ",\"preview_pipeline\":" << jsonString(preview_pipeline_)
              << ",\"preview_client_pipeline\":" << jsonString(preview_client_pipeline_)
              << ",\"last_capture\":";
@@ -461,7 +488,8 @@ std::string CameraDaemon::buildStatusJson() const
         return json.str();
 }
 
-std::string CameraDaemon::buildSettingsJson(CameraSettings const &settings)
+std::string CameraDaemon::buildSettingsJson(CameraSettings const &settings,
+                                            std::string const &camera_model) const
 {
         std::ostringstream json;
         json << "{"
@@ -471,7 +499,33 @@ std::string CameraDaemon::buildSettingsJson(CameraSettings const &settings)
              << ",\"auto_exposure\":" << (settings.auto_exposure ? "true" : "false")
              << ",\"output_dir\":" << jsonString(settings.output_dir)
              << ",\"mode\":" << jsonString(settings.mode)
+             << ",\"metadata\":" << buildMetadataJson(settings, camera_model)
              << "}";
+        return json.str();
+}
+
+std::string CameraDaemon::buildMetadataJson(CameraSettings const &settings,
+                                            std::string const &camera_model) const
+{
+        std::ostringstream json;
+        json << "{"
+             << "\"make\":" << jsonString(settings.metadata.make)
+             << ",\"model\":" << jsonString(settings.metadata.model)
+             << ",\"unique_model\":" << jsonString(settings.metadata.unique_model)
+             << ",\"software\":" << jsonString(settings.metadata.software)
+             << ",\"artist\":" << jsonString(settings.metadata.artist)
+             << ",\"copyright\":" << jsonString(settings.metadata.copyright);
+
+        ImageMetadata effective = resolveMetadataForSensor(camera_model, settings.metadata, nullptr);
+        json << ",\"effective\":{"
+             << "\"make\":" << jsonString(effective.make)
+             << ",\"model\":" << jsonString(effective.model)
+             << ",\"unique_model\":" << jsonString(effective.unique_model)
+             << ",\"software\":" << jsonString(effective.software)
+             << ",\"artist\":" << jsonString(effective.artist)
+             << ",\"copyright\":" << jsonString(effective.copyright)
+             << "}";
+        json << "}";
         return json.str();
 }
 
@@ -535,8 +589,16 @@ CameraDaemon::CaptureResult CameraDaemon::runCineDngCapture(CameraSettings const
                 if (!raw_stream)
                         throw std::runtime_error("Raw stream unavailable - cannot write CinemaDNG");
 
+                std::string camera_model = app.CameraModel();
+                {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        last_camera_model_ = camera_model;
+                }
+                ImageMetadata resolved_metadata =
+                        resolveMetadataForSensor(camera_model, settings.metadata, nullptr);
                 std::unique_ptr<DngOutput> output =
-                        std::make_unique<DngOutput>(options, raw_info, app.CameraModel(), std::string(), false);
+                        std::make_unique<DngOutput>(options, raw_info, camera_model, resolved_metadata,
+                                                    std::string(), false);
                 output->SetFrameWrittenCallback([&result](std::string const &path) {
                         result.frames.push_back(path);
                 });
@@ -837,6 +899,79 @@ std::string CameraDaemon::makeCaptureDirectory(const std::string &base, const st
         return candidate.string();
 }
 
+bool CameraDaemon::applyMetadataPatch(JsonObject const &values, MetadataSettings &target,
+                                      std::string &error_message, bool &any) const
+{
+        any = false;
+        for (auto const &[key, value] : values)
+        {
+                auto text = value.asString();
+                if (!text)
+                {
+                        error_message = "Field '" + key + "' must be a string";
+                        return false;
+                }
+
+                if (key == "make")
+                        target.make = *text;
+                else if (key == "model")
+                        target.model = *text;
+                else if (key == "unique_model")
+                        target.unique_model = *text;
+                else if (key == "software")
+                        target.software = *text;
+                else if (key == "artist")
+                        target.artist = *text;
+                else if (key == "copyright")
+                        target.copyright = *text;
+                else
+                {
+                        error_message = "Unknown metadata field: " + key;
+                        return false;
+                }
+                any = true;
+        }
+        return true;
+}
+
+ImageMetadata CameraDaemon::resolveMetadataForSensor(std::string const &camera_model,
+                                                    MetadataSettings const &base,
+                                                    MetadataSettings const *override_settings) const
+{
+        MetadataSettings effective = base;
+        if (override_settings)
+        {
+                if (!override_settings->make.empty())
+                        effective.make = override_settings->make;
+                if (!override_settings->model.empty())
+                        effective.model = override_settings->model;
+                if (!override_settings->unique_model.empty())
+                        effective.unique_model = override_settings->unique_model;
+                if (!override_settings->software.empty())
+                        effective.software = override_settings->software;
+                if (!override_settings->artist.empty())
+                        effective.artist = override_settings->artist;
+                if (!override_settings->copyright.empty())
+                        effective.copyright = override_settings->copyright;
+        }
+
+        std::string sensor_label = camera_model.empty() ? "Unknown Sensor" : camera_model;
+        ImageMetadata resolved;
+        resolved.make = effective.make.empty() ? std::string(ODS_DEFAULT_MAKE) : effective.make;
+        resolved.model = effective.model.empty()
+                ? (std::string(ODS_DEFAULT_MODEL_PREFIX) + " (" + sensor_label + ")")
+                : effective.model;
+        resolved.unique_model = effective.unique_model.empty()
+                ? (resolved.make + " " + resolved.model)
+                : effective.unique_model;
+        resolved.software = effective.software.empty()
+                ? std::string(ODS_DEFAULT_SOFTWARE)
+                : effective.software;
+        resolved.artist = effective.artist;
+        resolved.copyright = effective.copyright;
+        return resolved;
+}
+
 void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoOptions &options, bool request_raw)
 {
         options.timeout.value = std::chrono::nanoseconds(0);
@@ -961,7 +1096,8 @@ void CameraDaemon::registerRoutes()
         server_.addHandler("GET", "/settings", [this](HttpRequest const &) {
                 HttpResponse response;
                 CameraSettings settings = getSettings();
-                response.body = buildSettingsJson(settings);
+                std::string camera_model = getLastCameraModel();
+                response.body = buildSettingsJson(settings, camera_model);
                 return response;
         });
 
@@ -976,17 +1112,67 @@ void CameraDaemon::registerRoutes()
                         return response;
                 }
                 camera_reconfigure_.store(true);
-                response.body = buildSettingsJson(getSettings());
+                CameraSettings settings = getSettings();
+                std::string camera_model = getLastCameraModel();
+                response.body = buildSettingsJson(settings, camera_model);
                 return response;
         });
 
-        server_.addHandler("POST", "/capture/still", [this](HttpRequest const &) {
+        server_.addHandler("GET", "/metadata", [this](HttpRequest const &) {
                 HttpResponse response;
+                CameraSettings settings = getSettings();
+                std::string camera_model = getLastCameraModel();
+                response.body = buildMetadataJson(settings, camera_model);
+                return response;
+        });
+
+        server_.addHandler("POST", "/metadata", [this](HttpRequest const &request) {
+                HttpResponse response;
+                std::string error;
+                JsonObject values = parseJsonObject(request.body);
+                if (!updateMetadata(values, error))
+                {
+                        response.status_code = 400;
+                        response.body = "{\"error\":" + jsonString(error) + "}";
+                        return response;
+                }
+                CameraSettings settings = getSettings();
+                std::string camera_model = getLastCameraModel();
+                response.body = buildMetadataJson(settings, camera_model);
+                return response;
+        });
+
+        server_.addHandler("POST", "/capture/still", [this](HttpRequest const &request) {
+                HttpResponse response;
+                std::optional<MetadataSettings> metadata_override;
+                if (!request.body.empty())
+                {
+                        JsonObject values = parseJsonObject(request.body);
+                        if (!values.empty())
+                        {
+                                std::string error;
+                                MetadataSettings parsed;
+                                bool any = false;
+                                if (!applyMetadataPatch(values, parsed, error, any))
+                                {
+                                        response.status_code = 400;
+                                        response.body = "{\"error\":" + jsonString(error) + "}";
+                                        return response;
+                                }
+                                if (any)
+                                        metadata_override = parsed;
+                        }
+                }
                 // Arm a one-shot still capture via the background camera loop.
                 {
                         std::lock_guard<std::mutex> lock(capture_mutex_);
                         still_result_.clear();
                         still_pending_ = true;
+                        if (metadata_override)
+                        {
+                                still_metadata_override_ = *metadata_override;
+                                still_metadata_override_pending_ = true;
+                        }
                 }
 
                 // Wait for one frame to be written (with a timeout).
@@ -1341,6 +1527,7 @@ void CameraDaemon::cameraLoop()
                                 std::string clip_directory;
                                 std::string override_pattern;
                                 bool recording = false;
+                                std::optional<MetadataSettings> still_override;
                                 {
                                         std::lock_guard<std::mutex> lock(capture_mutex_);
                                         if (active_output_)
@@ -1353,6 +1540,11 @@ void CameraDaemon::cameraLoop()
                                                         (std::filesystem::path(clip_directory) / "frame-%08u.dng")
                                                                 .string();
                                         }
+                                        if (!recording && still_metadata_override_pending_)
+                                        {
+                                                still_override = still_metadata_override_;
+                                                still_metadata_override_pending_ = false;
+                                        }
                                 }
 
                                 if (recording && !override_pattern.empty())
@@ -1364,8 +1556,19 @@ void CameraDaemon::cameraLoop()
                                         LOG(2, "Instantiating still DNG writer: " << options->output);
 
                                 bool reset_index = recording;
-                                auto out = std::make_shared<DngOutput>(options, rinfo, app.CameraModel(),
-                                                                        override_pattern, reset_index);
+                                std::string camera_model = app.CameraModel();
+                                MetadataSettings base_metadata;
+                                {
+                                        std::lock_guard<std::mutex> lock(mutex_);
+                                        base_metadata = settings_.metadata;
+                                        last_camera_model_ = camera_model;
+                                }
+                                ImageMetadata resolved_metadata =
+                                        resolveMetadataForSensor(camera_model, base_metadata,
+                                                                 still_override ? &*still_override : nullptr);
+                                auto out = std::make_shared<DngOutput>(options, rinfo, camera_model,
+                                                                        resolved_metadata, override_pattern,
+                                                                        reset_index);
                                 out->SetFrameWrittenCallback([this, clip_directory](std::string const &path) {
                                         std::string final_path = path;
 

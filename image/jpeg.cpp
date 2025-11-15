@@ -22,6 +22,8 @@
 
 #include "core/still_options.hpp"
 #include "core/stream_info.hpp"
+#include "image/image.hpp"
+#include "metadata_config.hpp"
 
 #ifndef MAKE_STRING
 #define MAKE_STRING "Raspberry Pi"
@@ -436,8 +438,8 @@ static void YUV_to_JPEG(const uint8_t *input, StreamInfo const &info, const int 
 
 static void create_exif_data(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const &info,
 							 ControlList const &metadata, std::string const &cam_model, StillOptions const *options,
-							 uint8_t *&exif_buffer, unsigned int &exif_len, uint8_t *&thumb_buffer,
-							 jpeg_mem_len_t &thumb_len)
+							 ImageMetadata const &image_metadata, uint8_t *&exif_buffer, unsigned int &exif_len,
+							 uint8_t *&thumb_buffer, jpeg_mem_len_t &thumb_len)
 {
 	exif_buffer = nullptr;
 	ExifData *exif = nullptr;
@@ -451,12 +453,21 @@ static void create_exif_data(std::vector<libcamera::Span<uint8_t>> const &mem, S
 
 		// First add some fixed EXIF tags.
 
+		std::string sensor_label = cam_model.empty() ? "Unknown Sensor" : cam_model;
+		std::string effective_make = image_metadata.make.empty() ? std::string(ODS_DEFAULT_MAKE) : image_metadata.make;
+		std::string effective_model = image_metadata.model.empty()
+			? (std::string(ODS_DEFAULT_MODEL_PREFIX) + " (" + sensor_label + ")")
+			: image_metadata.model;
+		std::string effective_software = image_metadata.software.empty()
+			? std::string(ODS_DEFAULT_SOFTWARE)
+			: image_metadata.software;
+
 		ExifEntry *entry = exif_create_tag(exif, EXIF_IFD_EXIF, EXIF_TAG_MAKE);
-		exif_set_string(entry, MAKE_STRING);
+		exif_set_string(entry, effective_make.c_str());
 		entry = exif_create_tag(exif, EXIF_IFD_EXIF, EXIF_TAG_MODEL);
-		exif_set_string(entry, cam_model.c_str());
+		exif_set_string(entry, effective_model.c_str());
 		entry = exif_create_tag(exif, EXIF_IFD_EXIF, EXIF_TAG_SOFTWARE);
-		exif_set_string(entry, "rpicam-apps");
+		exif_set_string(entry, effective_software.c_str());
 		entry = exif_create_tag(exif, EXIF_IFD_EXIF, EXIF_TAG_DATE_TIME);
 		std::time_t raw_time;
 		std::time(&raw_time);
@@ -469,6 +480,16 @@ static void create_exif_data(std::vector<libcamera::Span<uint8_t>> const &mem, S
 		exif_set_string(entry, time_string);
 		entry = exif_create_tag(exif, EXIF_IFD_EXIF, EXIF_TAG_DATE_TIME_DIGITIZED);
 		exif_set_string(entry, time_string);
+		if (!image_metadata.artist.empty())
+		{
+			entry = exif_create_tag(exif, EXIF_IFD_EXIF, EXIF_TAG_ARTIST);
+			exif_set_string(entry, image_metadata.artist.c_str());
+		}
+		if (!image_metadata.copyright.empty())
+		{
+			entry = exif_create_tag(exif, EXIF_IFD_EXIF, EXIF_TAG_COPYRIGHT);
+			exif_set_string(entry, image_metadata.copyright.c_str());
+		}
 
 		// Now add some tags filled in from the image metadata.
 		auto exposure_time = metadata.get(libcamera::controls::ExposureTime);
@@ -571,7 +592,8 @@ static void create_exif_data(std::vector<libcamera::Span<uint8_t>> const &mem, S
 }
 
 void jpeg_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const &info, ControlList const &metadata,
-			   std::string const &filename, std::string const &cam_model, StillOptions const *options)
+			   std::string const &filename, std::string const &cam_model, StillOptions const *options,
+			   ImageMetadata const &image_metadata)
 {
 	FILE *fp = nullptr;
 	uint8_t *thumb_buffer = nullptr;
@@ -589,7 +611,8 @@ void jpeg_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo cons
 
 		jpeg_mem_len_t thumb_len = 0; // stays zero if no thumbnail
 		unsigned int exif_len;
-		create_exif_data(mem, info, metadata, cam_model, options, exif_buffer, exif_len, thumb_buffer, thumb_len);
+		create_exif_data(mem, info, metadata, cam_model, options, image_metadata, exif_buffer, exif_len,
+						 thumb_buffer, thumb_len);
 
 		// Make the full size JPEG (could probably be more efficient if we had
 		// YUV422 or YUV420 planar format).

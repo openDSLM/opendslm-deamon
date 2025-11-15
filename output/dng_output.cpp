@@ -51,8 +51,9 @@ std::string derive_pattern(const std::string &output)
 } // namespace
 
 DngOutput::DngOutput(VideoOptions const *options, StreamInfo const &info, std::string camera_model,
-                     std::string override_pattern, bool reset_frame_index)
+                     ImageMetadata metadata, std::string override_pattern, bool reset_frame_index)
         : Output(options), info_(info), camera_model_(std::move(camera_model)),
+          metadata_(std::move(metadata)),
           filename_pattern_(derive_pattern(override_pattern.empty() ? options->output : override_pattern))
 {
         if (options->output == "-")
@@ -241,7 +242,7 @@ void DngOutput::outputBuffer(void *mem, size_t size, int64_t, uint32_t)
         std::string filename = nextFilename();
 
         LOG(2, "Writing CinemaDNG frame to " << filename);
-        dng_save(spans, info_, metadata, filename, camera_model_, nullptr);
+        dng_save(spans, info_, metadata, filename, camera_model_, nullptr, metadata_);
 
         if (frame_written_callback_)
                 frame_written_callback_(filename);

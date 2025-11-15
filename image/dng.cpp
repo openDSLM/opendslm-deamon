@@ -19,6 +19,8 @@
 
 #include "core/still_options.hpp"
 #include "core/stream_info.hpp"
+#include "image/image.hpp"
+#include "metadata_config.hpp"
 
 #ifndef MAKE_STRING
 #define MAKE_STRING "Raspberry Pi"
@@ -343,7 +345,8 @@ Matrix(float m0, float m1, float m2,
 };
 
 void dng_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const &info, ControlList const &metadata,
-			  std::string const &filename, std::string const &cam_model, StillOptions const *options)
+			  std::string const &filename, std::string const &cam_model, StillOptions const *options,
+			  ImageMetadata const &image_metadata)
 {
 	// Check the Bayer format and unpack it to u16.
 
@@ -474,7 +477,17 @@ void dng_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const
 			1u, static_cast<unsigned int>((effective_height + thumbnail_block_size - 1) / thumbnail_block_size));
 		uint32_t white = (1 << bayer_format.bits) - 1;
 		toff_t offset_subifd = 0, offset_exififd = 0;
-		std::string unique_model = std::string(MAKE_STRING " ") + cam_model;
+		std::string sensor_label = cam_model.empty() ? "Unknown Sensor" : cam_model;
+		std::string effective_make = image_metadata.make.empty() ? std::string(ODS_DEFAULT_MAKE) : image_metadata.make;
+		std::string effective_model = image_metadata.model.empty()
+			? (std::string(ODS_DEFAULT_MODEL_PREFIX) + " (" + sensor_label + ")")
+			: image_metadata.model;
+		std::string effective_unique = image_metadata.unique_model.empty()
+			? (effective_make + " " + effective_model)
+			: image_metadata.unique_model;
+		std::string effective_software = image_metadata.software.empty()
+			? std::string(ODS_DEFAULT_SOFTWARE)
+			: image_metadata.software;
 
 		tif = TIFFOpen(filename.c_str(), "w");
 		if (!tif)
@@ -491,16 +504,19 @@ void dng_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const
 		TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP, thumb_height);
 		TIFFSetField(tif, TIFFTAG_JPEGCOLORMODE, JPEGCOLORMODE_RGB);
 		TIFFSetField(tif, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
-		TIFFSetField(tif, TIFFTAG_MAKE, MAKE_STRING);
-		TIFFSetField(tif, TIFFTAG_MODEL, cam_model.c_str());
+		TIFFSetField(tif, TIFFTAG_MAKE, effective_make.c_str());
+		TIFFSetField(tif, TIFFTAG_MODEL, effective_model.c_str());
 		TIFFSetField(tif, TIFFTAG_DNGVERSION, "\001\001\000\000");
 		TIFFSetField(tif, TIFFTAG_DNGBACKWARDVERSION, "\001\000\000\000");
-		TIFFSetField(tif, TIFFTAG_UNIQUECAMERAMODEL, unique_model.c_str());
+		TIFFSetField(tif, TIFFTAG_UNIQUECAMERAMODEL, effective_unique.c_str());
 		TIFFSetField(tif, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
 		TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, 3);
 		TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
-		const char *software_tag = "oDSLMd-daemon meson build";
-		TIFFSetField(tif, TIFFTAG_SOFTWARE, software_tag);
+		TIFFSetField(tif, TIFFTAG_SOFTWARE, effective_software.c_str());
+		if (!image_metadata.artist.empty())
+			TIFFSetField(tif, TIFFTAG_ARTIST, image_metadata.artist.c_str());
+		if (!image_metadata.copyright.empty())
+			TIFFSetField(tif, TIFFTAG_COPYRIGHT, image_metadata.copyright.c_str());
 		TIFFSetField(tif, TIFFTAG_COLORMATRIX1, 9, CAM_XYZ.m);
 		TIFFSetField(tif, TIFFTAG_ASSHOTNEUTRAL, 3, NEUTRAL);
 		TIFFSetField(tif, TIFFTAG_CALIBRATIONILLUMINANT1, 21);
@@ -637,6 +653,14 @@ void dng_save(std::vector<libcamera::Span<uint8_t>> const &mem, StreamInfo const
 		TIFFSetField(tif, TIFFTAG_CFAPATTERN, bayer_format.order);
 #endif
 		TIFFSetField(tif, TIFFTAG_WHITELEVEL, 1, &white);
+		TIFFSetField(tif, TIFFTAG_MAKE, effective_make.c_str());
+		TIFFSetField(tif, TIFFTAG_MODEL, effective_model.c_str());
+		TIFFSetField(tif, TIFFTAG_UNIQUECAMERAMODEL, effective_unique.c_str());
+		TIFFSetField(tif, TIFFTAG_SOFTWARE, effective_software.c_str());
+		if (!image_metadata.artist.empty())
+			TIFFSetField(tif, TIFFTAG_ARTIST, image_metadata.artist.c_str());
+		if (!image_metadata.copyright.empty())
+			TIFFSetField(tif, TIFFTAG_COPYRIGHT, image_metadata.copyright.c_str());
 		const uint16_t black_level_repeat_dim[] = { 2, 2 };
 		TIFFSetField(tif, TIFFTAG_BLACKLEVELREPEATDIM, &black_level_repeat_dim);
 		TIFFSetField(tif, TIFFTAG_BLACKLEVEL, 4, &black_levels);
