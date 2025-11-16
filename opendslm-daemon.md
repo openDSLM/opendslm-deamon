@@ -4,8 +4,9 @@
 libcamera pipeline for DSLR-style workflows. It exposes endpoints to configure
 sensor parameters, trigger CinemaDNG stills, start/stop RAW video sequences, and
 stream preview frames. The current alpha has only been tested on Raspberry Pi 4B
-and Raspberry Pi 5 boards paired with the IMX585 “StarlightEye” module, but the
-code should adapt easily to other libcamera-compatible sensors.
+and Raspberry Pi 5 boards paired with the IMX585 “StarlightEye” module; see the
+[compatibility matrix](README.md#compatibility-alpha) for other sensors that may
+work with additional tweaking.
 
 ## Building
 
@@ -43,8 +44,9 @@ the existing post-processing pipeline configuration.
   proxy that enforces access control and request size limits.
 - ⚠️ `/preview/stream` accepts a single MJPEG client at a time. Additional
   connections receive HTTP 409 until the active viewer disconnects.
-- ⚠️ CinemaDNG video capture is still experimental and writes every frame to
-  disk. Monitor free space carefully and stop recordings explicitly.
+- ⚠️ CinemaDNG video capture is still experimental, currently unreliable, and
+  writes every frame to disk. Treat it as **not working** for production; expect
+  to manage clip directories manually and babysit disk usage.
 - ⚠️ Still captures block until a frame finishes writing; very long exposures
   can exceed the default timeout and return HTTP 503 even though the camera is
   still busy.
@@ -108,12 +110,16 @@ JSON body may optionally override metadata for this shot:
 If another session is active the daemon returns HTTP 409; if the shot takes too
 long it returns HTTP 503.
 
-### `POST /recordings/video`
-####** UNSTABLE **
+### `POST /recordings/video` (unstable)
 Starts a CinemaDNG video recording that runs until `DELETE /recordings/video` is
-called. The JSON body **must** provide a destination folder name via `path`,
+called. **Alpha warning:** this path is still experimental, regularly drops
+frames, and expects you to provision the storage location. Treat it as a preview
+feature rather than a working recorder.
+
+The JSON body **must** provide a destination folder name via `path`,
 `directory`, `folder`, or `folder_name`. Relative entries are used as-is, so
-provide absolute paths or pre-join them with the configured `output_dir`.
+provide absolute paths or pre-join them with the configured `output_dir`. Make
+sure the directory exists and has ample free space before starting a capture.
 
 Example:
 
@@ -121,7 +127,8 @@ Example:
 {"directory": "/ssd/RAW/20240520_clip"}
 ```
 
-If a recording is already running the daemon returns HTTP 409.
+If a recording is already running the daemon returns HTTP 409. If anything goes
+wrong mid-capture you must clean up the partially written DNG files manually.
 
 ### `DELETE /recordings/video`
 

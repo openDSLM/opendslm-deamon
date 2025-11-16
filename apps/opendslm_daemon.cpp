@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /*
- * rpicam_daemon.cpp - HTTP daemon backing future DSLR-style UI workflows.
+ * opendslm_daemon.cpp - HTTP daemon backing future DSLR-style UI workflows.
  */
 
 #include <atomic>

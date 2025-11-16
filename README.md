@@ -25,10 +25,25 @@ remain valid:
   authentication and size limits.
 * ⚠️ MJPEG streaming (`/preview/stream`) supports a single client at a time; new
   connections are rejected until the previous viewer disconnects.
-* ⚠️ CinemaDNG video mode remains **experimental**. The daemon writes every RAW
-  frame to disk, so ensure you have ample storage and stop recordings manually.
+* ⚠️ CinemaDNG video mode remains **experimental** and is **not** considered
+  working yet. The daemon writes every RAW frame to disk, expects you to manage
+  clip directories manually, and may drop frames—treat it as a preview only.
 * ⚠️ Slow shutters can exceed the default still capture timeout. Adjust
   expectations and keep the daemon responsive while we add configurable limits.
+
+## Compatibility (alpha)
+
+| Platform / Sensor | Status | Notes |
+| --- | --- | --- |
+| Raspberry Pi 5 + IMX585 StarlightEye | ✅ Tested | Reference platform; full stills pipeline validated. |
+| Raspberry Pi 4B + IMX585 StarlightEye | ✅ Tested | Same feature set as Pi 5 with reduced preview FPS. |
+| Raspberry Pi 5 + OneInchEye (IMX678) | ⚠️ Untested | Expected to work but needs mode strings/metadata verification; may require small code tweaks. |
+| Raspberry Pi 5 + FourthThirdsEye (IMX492) | ⚠️ Untested | Sensor maps exist but require review of RAW mode timings. |
+| Other libcamera sensors | 🛠️ Community help needed | Should build, but add your mode strings/metadata and report results. |
+
+If you bring up a new sensor, update `metadata_config.hpp.in` /
+`metadata_make` options and share the `--list-cameras` output so we can extend
+the defaults.
 
 ## Building
 
