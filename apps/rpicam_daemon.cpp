@@ -143,7 +143,7 @@ CommandLineOptions parseCommandLine(int argc, char *argv[])
                 }
                 else if (arg == "--help" || arg == "-h")
                 {
-                        std::cout << "Usage: rpicam-daemon [--port <port>] [preview options]\n";
+                        std::cout << "Usage: opendslm-daemon [--port <port>] [preview options]\n";
                         std::cout << "Preview options:\n";
                         std::cout << "  --preview-gstreamer <pipeline>        Use a custom GStreamer pipeline (downstream of appsrc).\n";
                         std::cout << "  --preview-gstreamer=none|off          Disable the GStreamer preview backend.\n";
@@ -207,7 +207,7 @@ int main(int argc, char *argv[])
                 std::signal(SIGINT, signalHandler);
                 std::signal(SIGTERM, signalHandler);
 
-                std::cout << "rpicam-daemon listening on port " << cli.port << std::endl;
+                std::cout << "opendslm-daemon listening on port " << cli.port << std::endl;
                 if (!cli.preview_pipeline.empty())
                         std::cout << "Preview pipeline: " << cli.preview_pipeline << std::endl;
                 if (!cli.preview_client_pipeline.empty())

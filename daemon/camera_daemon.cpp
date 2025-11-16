@@ -555,7 +555,7 @@ CameraDaemon::CaptureResult CameraDaemon::runCineDngCapture(CameraSettings const
                 VideoOptions *options = app.GetOptions();
                 // Initialise all Options fields to safe defaults by parsing an empty CLI.
                 // This avoids uninitialised members (e.g. lores sizes, camera index, denoise).
-                char arg0[] = "rpicam-daemon";
+                char arg0[] = "opendslm-daemon";
                 char *argv[] = { arg0 };
                 int argc = 1;
                 options->Parse(argc, argv);
@@ -681,7 +681,7 @@ bool CameraDaemon::capturePreviewSnapshot(CameraSettings const &settings, std::v
                 PreviewEncoder app;
                 VideoOptions *options = app.GetOptions();
                 // Ensure Options are default-initialised to avoid undefined values.
-                char arg0[] = "rpicam-daemon";
+                char arg0[] = "opendslm-daemon";
                 char *argv[] = { arg0 };
                 int argc = 1;
                 options->Parse(argc, argv);
@@ -1358,7 +1358,7 @@ void CameraDaemon::cameraLoop()
                         PreviewEncoder app;
                         VideoOptions *options = app.GetOptions();
                         // Default-initialise Options
-                        char arg0[] = "rpicam-daemon";
+                        char arg0[] = "opendslm-daemon";
                         char *argv[] = { arg0 };
                         int argc = 1;
                         options->Parse(argc, argv);

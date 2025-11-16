@@ -1,9 +1,12 @@
 # oDSLMd Daemon Extract
 
-This directory contains a standalone build of the rpicam settings/preview daemon
-and the minimum shared support code copied from the original `rpicam-apps`
-project.  It is intended to make it easier to evolve the daemon independently of
-other camera applications while preserving attribution and licensing.
+This directory contains a standalone build of the openDSLM settings/preview
+daemon (referred to as the `opendslm-daemon`) and the minimum shared support
+code copied from the original `rpicam-apps` project.  It is intended to make it
+easier to evolve the daemon independently of other camera applications while
+preserving attribution and licensing.  The codebase currently targets Raspberry
+Pi 4B/5 boards paired with an IMX585 "StarlightEye" module but should be readily
+adaptable to other libcamera-supported sensors.
 
 The layout mirrors the upstream source tree so that existing include paths
 remain valid:
@@ -13,17 +16,40 @@ remain valid:
   assists that enrich the live feed (focus peaking, zebras, false colour, …)
   now live under `post_processing_stages/assist/`.
 * `daemon/` contains the HTTP controller implementation.
-* `apps/` supplies the `rpicam-daemon` entry point and Meson build rules.
+* `apps/` supplies the `opendslm-daemon` entry point and Meson build rules.
+
+## Status and warnings
+
+* ⚠️ The HTTP server ships without TLS/authentication or request throttling. Run
+  it on trusted networks only, ideally behind a reverse proxy that enforces
+  authentication and size limits.
+* ⚠️ MJPEG streaming (`/preview/stream`) supports a single client at a time; new
+  connections are rejected until the previous viewer disconnects.
+* ⚠️ CinemaDNG video mode remains **experimental**. The daemon writes every RAW
+  frame to disk, so ensure you have ample storage and stop recordings manually.
+* ⚠️ Slow shutters can exceed the default still capture timeout. Adjust
+  expectations and keep the daemon responsive while we add configurable limits.
 
 ## Building
 
-```
-meson setup build
-ninja -C build 
-```
+1. Install the usual Raspberry Pi camera dependencies (libcamera, Meson ≥ 0.64,
+   ninja-build, GStreamer if preview streaming is required).
+2. Configure a build directory (example uses the default release profile):
+   ```
+   meson setup build
+   ```
+3. Compile the daemon and supporting library:
+   ```
+   ninja -C build
+   ```
+4. Run the service on the Pi:
+   ```
+   ./build/apps/opendslm-daemon --port 8400
+   ```
 
 The resulting binary links against the locally built `rpicam_app` support
-library and exports no additional applications by default.
+library and exports no additional applications by default. See
+[`opendslm-daemon.md`](opendslm-daemon.md) for the HTTP API and workflow guide.
 
 ## Licensing
 
