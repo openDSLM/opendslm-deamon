@@ -317,6 +317,27 @@ bool CameraDaemon::updateSettings(JsonObject const &values, std::string &error_m
         return true;
 }
 
+bool CameraDaemon::updateMetadata(JsonObject const &values, std::string &error_message)
+{
+        MetadataSettings updated;
+        {
+                std::lock_guard<std::mutex> lock(mutex_);
+                updated = settings_.metadata;
+        }
+
+        bool any = false;
+        if (!applyMetadataPatch(values, updated, error_message, any))
+                return false;
+
+        {
+                std::lock_guard<std::mutex> lock(mutex_);
+                settings_.metadata = updated;
+                session_.last_error.clear();
+        }
+
+        return true;
+}
+
 bool CameraDaemon::startSession(SessionMode mode, const std::string &video_path, std::string &error_message)
 {
         if (mode == SessionMode::Still)
@@ -1507,18 +1528,35 @@ void CameraDaemon::cameraLoop()
                                 throw std::runtime_error("Raw stream unavailable");
 
                         // Prepare DNG writer creation lambda
-                        auto ensure_output = [this, options, &rinfo, &app]() {
-                                if (active_output_)
-                                        return;
-                                std::string override_pattern = video_sequence_path_.empty() ? options->output
-                                                                                            : video_sequence_path_;
+                        auto ensure_output = [this, options, &rinfo, &app, settings]() {
+                                MetadataSettings metadata_override;
+                                bool use_override = false;
+                                std::string override_pattern;
+                                {
+                                        std::lock_guard<std::mutex> lock(capture_mutex_);
+                                        if (active_output_)
+                                                return;
+                                        override_pattern = video_sequence_path_.empty() ? options->output
+                                                                                        : video_sequence_path_;
+                                        if (still_pending_ && !video_recording_ && still_metadata_override_pending_)
+                                        {
+                                                metadata_override = still_metadata_override_;
+                                                still_metadata_override_pending_ = false;
+                                                use_override = true;
+                                        }
+                                }
+
+                                ImageMetadata resolved_metadata =
+                                        resolveMetadataForSensor(app.CameraModel(), settings.metadata,
+                                                                 use_override ? &metadata_override : nullptr);
+
                                 auto out = std::make_shared<DngOutput>(options, rinfo, app.CameraModel(),
-                                                                       override_pattern);
+                                                                       resolved_metadata, override_pattern);
                                 out->SetFrameWrittenCallback([this](std::string const &path) {
                                         std::lock_guard<std::mutex> lock(capture_mutex_);
                                         if (still_pending_)
                                         {
-                                                still_result_.push_back(final_path);
+                                                still_result_.push_back(path);
                                                 still_pending_ = false;
                                                 still_cv_.notify_all();
                                         }
@@ -1526,9 +1564,8 @@ void CameraDaemon::cameraLoop()
                                         {
                                                 std::lock_guard<std::mutex> lock2(mutex_);
                                                 last_capture_.type = "video";
-                                                last_capture_.frames.push_back(final_path);
-                                                last_capture_.directory =
-                                                        clip_directory.empty() ? video_sequence_path_ : clip_directory;
+                                                last_capture_.frames.push_back(path);
+                                                last_capture_.directory = video_sequence_path_;
                                         }
                                 });
                                 {
