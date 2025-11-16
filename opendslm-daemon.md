@@ -37,6 +37,15 @@ to customise the recommended client pipeline. Preview overlays (focus peaking,
 zebras, etc.) live under `post_processing_stages/assist/` and can be enabled via
 the existing post-processing pipeline configuration.
 
+### Gtk UI integration
+
+The daemon is the backend for the
+[openDSLM GTK UI](https://github.com/openDSLM/gtk-ui). When both projects live
+under `/ssd/GitHub/`, start the daemon first (`./build/apps/opendslm-daemon
+--port 8400`) so the UI client can attach to `/status`, `/settings`, `/preview`
+and the GStreamer shared-memory socket. If you customise ports or socket paths,
+export matching overrides before launching the GTK frontend.
+
 ### Known limitations (alpha warning)
 
 - ⚠️ The HTTP server does **not** provide TLS, authentication, or request

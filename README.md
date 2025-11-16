@@ -31,6 +31,15 @@ remain valid:
 * ⚠️ Slow shutters can exceed the default still capture timeout. Adjust
   expectations and keep the daemon responsive while we add configurable limits.
 
+## Default UI integration
+
+The daemon powers the [openDSLM GTK UI](https://github.com/openDSLM/gtk-ui), so
+the latest UI snapshots inside `/ssd/GitHub/gtk-ui/` expect the HTTP API
+described here. Launch `opendslm-daemon` before starting the GTK client so the
+UI can attach to the `/status`, `/settings`, `/preview`, and GStreamer shared
+memory endpoints. If you change ports or socket paths remember to update the UI
+environment variables accordingly.
+
 ## Compatibility (alpha)
 
 | Platform / Sensor | Status | Notes |
