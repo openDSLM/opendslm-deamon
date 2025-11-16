@@ -1,6 +1,6 @@
 project('openDSLM', 'c', 'cpp',
         meson_version : '>= 0.64.0',
-        version : '0.1.0 pre-Alpha',
+        version : '0.1.0',
         default_options : [
             'werror=true',
             'warning_level=3',
