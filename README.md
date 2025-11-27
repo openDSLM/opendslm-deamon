@@ -43,11 +43,27 @@ socket paths, export matching overrides for the UI environment variables.
 
 | Platform / Sensor | Status | Notes |
 | --- | --- | --- |
-| Raspberry Pi 5 + IMX585 StarlightEye | ✅ Tested | Reference platform; full stills pipeline validated. |
-| Raspberry Pi 4B + IMX585 StarlightEye | ✅ Tested | Same feature set as Pi 5 with reduced preview FPS. |
+| Raspberry Pi 5 + IMX585 StarlightEye (Will Whang libcamera fork) | ✅ Tested | Reference platform; requires Will Whang’s IMX585 driver and libcamera build. |
+| Raspberry Pi 4B + IMX585 StarlightEye | ⚠️ Expected | Should work if the IMX585 driver/libcamera fork is installed; currently unverified. |
 | Raspberry Pi 5 + OneInchEye (IMX678) | ⚠️ Untested | Expected to work but needs mode strings/metadata verification; may require small code tweaks. |
 | Raspberry Pi 5 + FourthThirdsEye (IMX492) | ⚠️ Untested | Sensor maps exist but require review of RAW mode timings. |
 | Other libcamera sensors | 🛠️ Community help needed | Should build, but add your mode strings/metadata and report results. |
+
+The IMX585 path assumes the driver and modified libcamera stack from Will Whang. Stock libcamera has not been validated for this module yet.
+
+### Quickstart (RPi 5 + IMX585)
+
+1. Install Raspberry Pi OS (64-bit) and the IMX585 driver plus Will Whang’s libcamera build.
+2. Configure and build:
+   ```
+   meson setup build
+   ninja -C build opendslm-daemon
+   ```
+3. Run the daemon:
+   ```
+   ./build/apps/opendslm-daemon --port 8400
+   ```
+4. (Optional) Start the GTK UI from the companion repo; it expects the default `http://127.0.0.1:8400` endpoint.
 
 If you bring up a new sensor, update `metadata_config.hpp.in` /
 `metadata_make` options and share the `--list-cameras` output so we can extend

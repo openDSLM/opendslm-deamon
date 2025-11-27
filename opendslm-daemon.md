@@ -3,10 +3,10 @@
 `opendslm-daemon` is a lightweight HTTP controller that drives the openDSLM
 libcamera pipeline for DSLR-style workflows. It exposes endpoints to configure
 sensor parameters, trigger CinemaDNG stills, start/stop RAW video sequences, and
-stream preview frames. The current alpha has only been tested on Raspberry Pi 4B
-and Raspberry Pi 5 boards paired with the IMX585 “StarlightEye” module; see the
-[compatibility matrix](README.md#compatibility-alpha) for other sensors that may
-work with additional tweaking.
+stream preview frames. The current alpha has only been validated on Raspberry Pi
+5 with the IMX585 “StarlightEye” module using Will Whang’s IMX585 driver and
+libcamera build; see the [compatibility matrix](README.md#compatibility-alpha)
+for platforms that are expected but untested.
 
 On startup the daemon now probes the host (board model, kernel, OS build) and
 enumerates every libcamera sensor that is present. The detected metadata,
