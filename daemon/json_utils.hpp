@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /*
- * json_utils.hpp - Extremely small JSON helpers for the rpicam daemon.
+ * json_utils.hpp - Extremely small JSON helpers for the openDSLM daemon.
  */
 
 #pragma once
@@ -187,4 +187,3 @@ inline std::string jsonString(std::string const &value)
 }
 
 } // namespace rpicam
-

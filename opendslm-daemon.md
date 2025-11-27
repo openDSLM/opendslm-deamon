@@ -25,6 +25,9 @@ meson setup build
 ninja -C build opendslm-daemon
 ```
 
+The compiled binary lives at `build/apps/opendslm-daemon`; the legacy
+`rpicam-daemon` name is no longer used.
+
 ## Running
 
 ```bash

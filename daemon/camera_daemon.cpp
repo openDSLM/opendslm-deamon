@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /*
- * camera_daemon.cpp - High level controller for the rpicam daemon.
+ * camera_daemon.cpp - High level controller for the openDSLM daemon.
  */
 
 #include "daemon/camera_daemon.hpp"

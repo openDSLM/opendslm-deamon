@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /*
- * simple_http.hpp - Minimal HTTP server utilities for the rpicam daemon.
+ * simple_http.hpp - Minimal HTTP server utilities for the openDSLM daemon.
  */
 
 #pragma once

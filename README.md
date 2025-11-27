@@ -65,6 +65,8 @@ the defaults.
    ```
    ninja -C build
    ```
+   The resulting binary is `build/apps/opendslm-daemon` (the old `rpicam-daemon`
+   name is retired).
 4. Run the service on the Pi:
    ```
    ./build/apps/opendslm-daemon --port 8400
