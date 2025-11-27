@@ -8,6 +8,14 @@ and Raspberry Pi 5 boards paired with the IMX585 “StarlightEye” module; see 
 [compatibility matrix](README.md#compatibility-alpha) for other sensors that may
 work with additional tweaking.
 
+On startup the daemon now probes the host (board model, kernel, OS build) and
+enumerates every libcamera sensor that is present. The detected metadata,
+including every advertised RAW resolution/mode, is cached and exposed via the
+HTTP API so clients can present accurate options in their UI without hardcoding
+per-sensor tables. If a sensor is found, the daemon also seeds the metadata
+defaults (model/unique model) with the detected module so `/metadata` immediately
+reflects the attached hardware without any manual overrides.
+
 ## Building
 
 The daemon is built alongside the shared `rpicam_app` support library:
@@ -40,11 +48,11 @@ the existing post-processing pipeline configuration.
 ### Gtk UI integration
 
 The daemon is the backend for the
-[openDSLM GTK UI](https://github.com/openDSLM/gtk-ui). When both projects live
-under `/ssd/GitHub/`, start the daemon first (`./build/apps/opendslm-daemon
---port 8400`) so the UI client can attach to `/status`, `/settings`, `/preview`
-and the GStreamer shared-memory socket. If you customise ports or socket paths,
-export matching overrides before launching the GTK frontend.
+[openDSLM GTK UI](https://github.com/openDSLM/gtk-ui). Start the daemon first
+(`./build/apps/opendslm-daemon --port 8400`) so the UI client can attach to
+`/status`, `/settings`, `/preview`, and the GStreamer shared-memory socket. If
+you customise ports or socket paths, export matching overrides before launching
+the GTK frontend.
 
 ### Known limitations (alpha warning)
 
@@ -67,7 +75,48 @@ All endpoints speak UTF-8 JSON unless otherwise noted.
 ### `GET /status`
 
 Returns the current session state, camera settings, preview pipelines, and the
-summary of the latest capture (or `null` if nothing has been recorded yet).
+summary of the latest capture (or `null` if nothing has been recorded yet). The
+payload now also contains a `hardware` block that mirrors `GET /hardware`
+described below, so most clients only need a single request to populate camera
+settings and available resolutions.
+
+### `GET /hardware`
+
+Returns a snapshot of the detected platform and all attached sensors. A typical
+payload looks like:
+
+```json
+{
+  "board_model": "Raspberry Pi 5 Model B Rev 1.1",
+  "board_revision": "d03141",
+  "os_name": "Debian GNU/Linux 12 (bookworm)",
+  "kernel": "6.6.20-v8+",
+  "cameras": [
+    {
+      "id": "unicam-0",
+      "model": "Sony IMX585",
+      "location": "1",
+      "modes": [
+        {"width": 3840, "height": 2160, "bit_depth": 12, "format": "SRGGB12_CSI2P", "max_fps": 24.00},
+        {"width": 1920, "height": 1080, "bit_depth": 12, "format": "SRGGB12_CSI2P", "max_fps": 60.00}
+      ]
+    }
+  ]
+}
+```
+
+Fields:
+
+- `board_model`, `board_revision`, `os_name`, `kernel`: identifiers scraped from
+  `/proc/device-tree`, `/proc/cpuinfo`, `/etc/os-release`, and `uname(2)`.
+- `cameras`: one entry per libcamera sensor (USB webcams are excluded).
+  - `location` is the raw integer reported by libcamera (`0` front, `1` back,
+    `2` external).
+  - `modes` lists every advertised RAW sensor mode with pixel format, frame size,
+    bit depth, and the maximum FPS determined by applying the mode and querying
+    `FrameDurationLimits`.
+
+The same structure is embedded in `/status` under the `hardware` key.
 
 ### `GET /settings`
 
@@ -83,7 +132,7 @@ Updates camera settings. Only supplied keys change. Supported fields:
 | `shutter_us` | float | Exposure time in microseconds (≥ 0). |
 | `analogue_gain` | float | Analogue gain (> 0). |
 | `auto_exposure` | bool | Toggle automatic exposure. When true, manual shutter/gain are ignored. |
-| `output_dir` | string | Directory where CinemaDNG frames are written (default `/ssd/RAW`). |
+| `output_dir` | string | Directory where CinemaDNG frames are written (configure with `--output-dir`; choose any writable path). |
 | `mode` | string | Optional sensor mode string (`W:H:bit-depth:P|U`) to pin a RAW resolution. |
 
 Example:
@@ -133,7 +182,7 @@ sure the directory exists and has ample free space before starting a capture.
 Example:
 
 ```json
-{"directory": "/ssd/RAW/20240520_clip"}
+{"directory": "/path/to/RAW/20240520_clip"}
 ```
 
 If a recording is already running the daemon returns HTTP 409. If anything goes
@@ -166,6 +215,9 @@ Prefer the dedicated endpoints for clarity.
 ## Example commands
 
 ```bash
+# Detected board/sensor inventory
+curl http://localhost:8400/hardware | jq
+
 # Status and advertised preview pipelines
 curl http://localhost:8400/status | jq
 
@@ -182,7 +234,7 @@ curl -X POST http://localhost:8400/capture/still \
 # Begin a video capture into an explicit folder
 curl -X POST http://localhost:8400/recordings/video \
      -H 'Content-Type: application/json' \
-     -d '{"directory":"/ssd/RAW/20240520_clip"}'
+     -d '{"directory":"/path/to/RAW/20240520_clip"}'
 
 # Stop the active recording
 curl -X DELETE http://localhost:8400/recordings/video

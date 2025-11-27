@@ -33,12 +33,11 @@ remain valid:
 
 ## Default UI integration
 
-The daemon powers the [openDSLM GTK UI](https://github.com/openDSLM/gtk-ui), so
-the latest UI snapshots inside `/ssd/GitHub/gtk-ui/` expect the HTTP API
-described here. Launch `opendslm-daemon` before starting the GTK client so the
-UI can attach to the `/status`, `/settings`, `/preview`, and GStreamer shared
-memory endpoints. If you change ports or socket paths remember to update the UI
-environment variables accordingly.
+The daemon powers the [openDSLM GTK UI](https://github.com/openDSLM/gtk-ui), and
+current UI builds expect the HTTP API documented here. Start `opendslm-daemon`
+before launching the GTK client so it can attach to `/status`, `/settings`,
+`/preview`, and the GStreamer shared memory endpoints. If you change ports or
+socket paths, export matching overrides for the UI environment variables.
 
 ## Compatibility (alpha)
 

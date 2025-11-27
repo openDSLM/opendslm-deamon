@@ -9,6 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <ctime>
 #include <sstream>
@@ -17,10 +18,18 @@
 #include <utility>
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
+#include <sys/utsname.h>
 
 #include <jpeglib.h>
 #include <libcamera/base/span.h>
+#include <libcamera/camera.h>
+#include <libcamera/camera_manager.h>
+#include <libcamera/control_ids.h>
+#include <libcamera/controls.h>
 #include <libcamera/formats.h>
+#include <libcamera/logging.h>
+#include <libcamera/property_ids.h>
 
 #include "core/logging.hpp"
 #include "core/rpicam_encoder.hpp"
@@ -30,6 +39,9 @@
 #include "metadata_config.hpp"
 #include "output/dng_output.hpp"
 #include "preview/preview.hpp"
+
+namespace controls = libcamera::controls;
+namespace properties = libcamera::properties;
 
 namespace rpicam
 {
@@ -141,6 +153,138 @@ std::vector<uint8_t> encodeFrameToJpeg(libcamera::Span<uint8_t> span, StreamInfo
         return encoded;
 }
 
+std::string trimCopy(std::string value)
+{
+        auto null_pos = value.find('\0');
+        if (null_pos != std::string::npos)
+                value.erase(null_pos);
+        auto is_space = [](unsigned char ch) { return std::isspace(ch); };
+        value.erase(value.begin(), std::find_if(value.begin(), value.end(), [&](unsigned char ch) {
+                return !is_space(ch);
+        }));
+        value.erase(std::find_if(value.rbegin(), value.rend(), [&](unsigned char ch) {
+                return !is_space(ch);
+        }).base(), value.end());
+        return value;
+}
+
+std::string readFirstLine(const std::string &path)
+{
+        std::ifstream file(path);
+        if (!file.is_open())
+                return {};
+        std::string line;
+        std::getline(file, line);
+        return trimCopy(line);
+}
+
+std::string readCpuinfoField(const std::string &field)
+{
+        std::ifstream file("/proc/cpuinfo");
+        if (!file.is_open())
+                return {};
+        std::string needle = field + "\t:";
+        std::string line;
+        while (std::getline(file, line))
+        {
+                if (line.compare(0, needle.size(), needle) == 0)
+                {
+                        std::size_t colon = line.find(':');
+                        if (colon != std::string::npos)
+                                return trimCopy(line.substr(colon + 1));
+                }
+        }
+        return {};
+}
+
+std::string detectBoardModel()
+{
+        std::string model = readFirstLine("/proc/device-tree/model");
+        if (!model.empty())
+                return model;
+        model = readFirstLine("/sys/firmware/devicetree/base/model");
+        if (!model.empty())
+                return model;
+        return readCpuinfoField("Model");
+}
+
+std::string detectOsPrettyName()
+{
+        std::ifstream file("/etc/os-release");
+        if (!file.is_open())
+                return {};
+        std::string line;
+        constexpr char prefix[] = "PRETTY_NAME=";
+        constexpr size_t prefix_len = sizeof(prefix) - 1;
+        while (std::getline(file, line))
+        {
+                if (line.compare(0, prefix_len, prefix) == 0)
+                {
+                        std::string value = line.substr(prefix_len);
+                        if (!value.empty() && value.front() == '"' && value.back() == '"' && value.size() >= 2)
+                                value = value.substr(1, value.size() - 2);
+                        return trimCopy(value);
+                }
+        }
+        return {};
+}
+
+std::string detectKernelRelease()
+{
+        struct utsname info
+        {
+        };
+        if (uname(&info) == 0)
+                return info.release;
+        return {};
+}
+
+unsigned int deduceBitDepth(const libcamera::PixelFormat &format)
+{
+        std::string fmt = format.toString();
+        if (fmt.find("8") != std::string::npos)
+                return 8;
+        if (fmt.find("10") != std::string::npos)
+                return 10;
+        if (fmt.find("12") != std::string::npos)
+                return 12;
+        if (fmt.find("14") != std::string::npos)
+                return 14;
+        return 16;
+}
+
+double measureFrameRate(libcamera::Camera &camera, libcamera::CameraConfiguration &config,
+                        libcamera::Size const &size, libcamera::PixelFormat const &format, unsigned int bit_depth)
+{
+        config.at(0).size = size;
+        config.at(0).pixelFormat = format;
+        config.sensorConfig = libcamera::SensorConfiguration();
+        config.sensorConfig->outputSize = size;
+        config.sensorConfig->bitDepth = bit_depth;
+        config.validate();
+        int ret = camera.configure(&config);
+        if (ret)
+                return 0.0;
+
+        auto fd_ctrl = camera.controls().find(&controls::FrameDurationLimits);
+        if (fd_ctrl == camera.controls().end())
+                return 0.0;
+        int64_t min_duration = fd_ctrl->second.min().get<int64_t>();
+        if (min_duration <= 0)
+                return 0.0;
+        return 1e6 / static_cast<double>(min_duration);
+}
+
+std::string formatDouble(double value)
+{
+        if (value <= 0.0)
+                return "0";
+        std::ostringstream ss;
+        ss.setf(std::ios::fixed);
+        ss << std::setprecision(2) << value;
+        return ss.str();
+}
+
 } // namespace
 
 CameraDaemon::CameraDaemon()
@@ -194,6 +338,7 @@ std::string CameraDaemon::shmSocket() const
 
 void CameraDaemon::start(uint16_t port)
 {
+        probeHardwareInfo();
         registerRoutes();
         server_.start(port);
         startCameraLoop();
@@ -471,6 +616,7 @@ std::string CameraDaemon::buildStatusJson() const
                 json << "null";
         else
                 json << buildCaptureJson(last_capture_);
+        json << ",\"hardware\":" << buildHardwareJsonLocked(hardware_info_);
         json << "}";
         return json.str();
 }
@@ -541,6 +687,54 @@ std::string CameraDaemon::buildCaptureJson(CaptureSummary const &capture)
         json << ",\"count\":" << capture.frames.size();
         if (!capture.directory.empty())
                 json << ",\"directory\":" << jsonString(capture.directory);
+        json << "}";
+        return json.str();
+}
+
+std::string CameraDaemon::buildHardwareJson() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return buildHardwareJsonLocked(hardware_info_);
+}
+
+std::string CameraDaemon::buildHardwareJsonLocked(HardwareInfo const &info) const
+{
+        std::ostringstream json;
+        json << "{";
+        json << "\"board_model\":" << jsonString(info.board_model);
+        json << ",\"board_revision\":" << jsonString(info.board_revision);
+        json << ",\"os_name\":" << jsonString(info.os_name);
+        json << ",\"kernel\":" << jsonString(info.kernel);
+        json << ",\"cameras\":[";
+        for (size_t i = 0; i < info.cameras.size(); ++i)
+        {
+                if (i)
+                        json << ",";
+                CameraProbeInfo const &camera = info.cameras[i];
+                json << "{";
+                json << "\"id\":" << jsonString(camera.id);
+                json << ",\"model\":" << jsonString(camera.model);
+                json << ",\"location\":" << jsonString(camera.location);
+                json << ",\"modes\":[";
+                for (size_t m = 0; m < camera.modes.size(); ++m)
+                {
+                        if (m)
+                                json << ",";
+                        CameraModeInfo const &mode = camera.modes[m];
+                        json << "{";
+                        json << "\"width\":" << mode.width;
+                        json << ",\"height\":" << mode.height;
+                        json << ",\"bit_depth\":" << mode.bit_depth;
+                        json << ",\"format\":" << jsonString(mode.format);
+                        json << ",\"max_fps\":" << formatDouble(mode.max_fps);
+                        json << "}";
+                }
+                json << "]";
+                json << "}";
+        }
+        json << "]";
+        if (!info.error.empty())
+                json << ",\"error\":" << jsonString(info.error);
         json << "}";
         return json.str();
 }
@@ -959,6 +1153,142 @@ ImageMetadata CameraDaemon::resolveMetadataForSensor(std::string const &camera_m
         return resolved;
 }
 
+void CameraDaemon::probeHardwareInfo()
+{
+        HardwareInfo info;
+        info.board_model = detectBoardModel();
+        info.board_revision = readCpuinfoField("Revision");
+        info.os_name = detectOsPrettyName();
+        info.kernel = detectKernelRelease();
+
+        std::vector<std::string> errors;
+
+        try
+        {
+                libcamera::CameraManager manager;
+                int ret = manager.start();
+                if (ret)
+                        throw std::runtime_error("camera manager failed to start (" + std::to_string(-ret) + ")");
+
+                auto cameras = RPiCamApp::GetCameras(&manager);
+                bool log_env_set = getenv("LIBCAMERA_LOG_LEVELS");
+                if (!log_env_set)
+                        libcamera::logSetLevel("*", "ERROR");
+
+                for (auto &cam : cameras)
+                {
+                        try
+                        {
+                                CameraProbeInfo cam_info;
+                                cam_info.id = cam->id();
+                                if (auto model = cam->properties().get(properties::Model))
+                                        cam_info.model = *model;
+                                else
+                                        cam_info.model = cam->id();
+                                if (auto location = cam->properties().get(properties::Location))
+                                        cam_info.location = std::to_string(static_cast<int>(*location));
+
+                                if (cam->acquire())
+                                        throw std::runtime_error("failed to acquire camera");
+
+                                struct ReleaseGuard
+                                {
+                                        libcamera::Camera *camera;
+                                        ~ReleaseGuard()
+                                        {
+                                                if (camera)
+                                                        camera->release();
+                                        }
+                                } guard{ cam.get() };
+
+                                std::unique_ptr<libcamera::CameraConfiguration> config =
+                                        cam->generateConfiguration({ libcamera::StreamRole::Raw });
+                                if (!config)
+                                        throw std::runtime_error("unable to generate configuration");
+
+                                libcamera::StreamFormats const &formats = config->at(0).formats();
+                                for (auto const &pix : formats.pixelformats())
+                                {
+                                        for (auto const &size : formats.sizes(pix))
+                                        {
+                                                CameraModeInfo mode;
+                                                mode.width = size.width;
+                                                mode.height = size.height;
+                                                mode.format = pix.toString();
+                                                mode.bit_depth = deduceBitDepth(pix);
+                                                mode.max_fps = measureFrameRate(*cam, *config, size, pix,
+                                                                                mode.bit_depth);
+                                                cam_info.modes.push_back(std::move(mode));
+                                        }
+                                }
+
+                                info.cameras.push_back(std::move(cam_info));
+                        }
+                        catch (std::exception const &ex)
+                        {
+                                errors.push_back(cam->id() + ": " + ex.what());
+                                LOG_ERROR("Failed to probe camera " << cam->id() << ": " << ex.what());
+                        }
+                }
+
+                if (!log_env_set)
+                        libcamera::logSetLevel("*", "INFO");
+
+                manager.stop();
+        }
+        catch (std::exception const &ex)
+        {
+                errors.push_back(ex.what());
+                LOG_ERROR("Hardware probe failed: " << ex.what());
+        }
+
+        if (!errors.empty())
+        {
+                info.error.clear();
+                for (size_t i = 0; i < errors.size(); ++i)
+                {
+                        if (i)
+                                info.error += "; ";
+                        info.error += errors[i];
+                }
+        }
+
+        {
+                std::lock_guard<std::mutex> lock(mutex_);
+                hardware_info_ = std::move(info);
+                applyDetectedMetadataLocked(hardware_info_);
+        }
+}
+
+void CameraDaemon::applyDetectedMetadataLocked(HardwareInfo const &info)
+{
+        if (info.cameras.empty())
+                return;
+        CameraProbeInfo const &primary = info.cameras.front();
+        std::string detected_model = primary.model.empty() ? primary.id : primary.model;
+        if (!detected_model.empty())
+                last_camera_model_ = detected_model;
+
+        // Only publish defaults if the user hasn't customised metadata yet.
+        if (settings_.metadata.model.empty() && !detected_model.empty())
+                settings_.metadata.model = detected_model;
+
+        if (settings_.metadata.unique_model.empty())
+        {
+                std::string effective_make = settings_.metadata.make.empty()
+                        ? std::string(ODS_DEFAULT_MAKE)
+                        : settings_.metadata.make;
+                if (!effective_make.empty() || !settings_.metadata.model.empty())
+                {
+                        std::string combined = effective_make;
+                        if (!combined.empty() && !settings_.metadata.model.empty())
+                                combined += " ";
+                        combined += settings_.metadata.model;
+                        settings_.metadata.unique_model = combined;
+                }
+        }
+}
+
 void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoOptions &options, bool request_raw)
 {
         options.timeout.value = std::chrono::nanoseconds(0);
@@ -1017,6 +1347,12 @@ void CameraDaemon::registerRoutes()
         server_.addHandler("GET", "/status", [this](HttpRequest const &) {
                 HttpResponse response;
                 response.body = buildStatusJson();
+                return response;
+        });
+
+        server_.addHandler("GET", "/hardware", [this](HttpRequest const &) {
+                HttpResponse response;
+                response.body = buildHardwareJson();
                 return response;
         });
 

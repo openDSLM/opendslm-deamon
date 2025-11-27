@@ -65,6 +65,33 @@ struct CaptureSummary
         std::string directory;
 };
 
+struct CameraModeInfo
+{
+        unsigned int width = 0;
+        unsigned int height = 0;
+        std::string format;
+        unsigned int bit_depth = 0;
+        double max_fps = 0.0;
+};
+
+struct CameraProbeInfo
+{
+        std::string id;
+        std::string model;
+        std::string location;
+        std::vector<CameraModeInfo> modes;
+};
+
+struct HardwareInfo
+{
+        std::string board_model;
+        std::string board_revision;
+        std::string os_name;
+        std::string kernel;
+        std::vector<CameraProbeInfo> cameras;
+        std::string error;
+};
+
 class CameraDaemon
 {
 public:
@@ -102,6 +129,8 @@ private:
         std::string buildMetadataJson(CameraSettings const &settings, std::string const &camera_model) const;
         static std::string modeToString(SessionMode mode);
         static std::string buildCaptureJson(CaptureSummary const &capture);
+        std::string buildHardwareJson() const;
+        std::string buildHardwareJsonLocked(HardwareInfo const &info) const;
 
         CaptureResult runCineDngCapture(CameraSettings const &settings, bool single_shot,
                                         std::atomic<bool> *stop_flag);
@@ -116,6 +145,8 @@ private:
                                 bool &any) const;
         ImageMetadata resolveMetadataForSensor(std::string const &camera_model, MetadataSettings const &base,
                                                MetadataSettings const *override_settings) const;
+        void probeHardwareInfo();
+        void applyDetectedMetadataLocked(HardwareInfo const &info);
 
         void registerRoutes();
         // Unified background camera loop
@@ -131,6 +162,7 @@ private:
         SessionState session_;
         CaptureSummary last_capture_;
         std::string last_camera_model_;
+        HardwareInfo hardware_info_;
         std::string preview_pipeline_;
         std::string preview_client_pipeline_;
         bool preview_client_pipeline_explicit_ = false;
