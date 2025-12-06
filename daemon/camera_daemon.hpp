@@ -7,6 +7,8 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <future>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -63,6 +65,42 @@ struct CaptureSummary
         std::string type;
         std::vector<std::string> frames;
         std::string directory;
+};
+
+struct Mp4RecordingStatus
+{
+        bool active = false;
+        std::string filename;
+        std::string last_error;
+};
+
+struct Mp4RecordingConfig
+{
+        std::string filename;
+        std::optional<unsigned int> width;
+        std::optional<unsigned int> height;
+        std::optional<double> fps;
+        std::optional<unsigned int> bitrate;
+        std::optional<unsigned int> intra;
+};
+
+class Mp4RecordingController
+{
+public:
+        bool start(Mp4RecordingConfig const &config, CameraSettings const &settings, std::string &error);
+        bool stop(std::string &error);
+        Mp4RecordingStatus status() const;
+
+private:
+        void recordingThread(Mp4RecordingConfig config, CameraSettings settings, std::promise<bool> started);
+
+        mutable std::mutex mutex_;
+        std::thread thread_;
+        std::atomic<bool> stop_flag_{false};
+        std::shared_ptr<RPiCamEncoder> app_;
+        bool active_ = false;
+        std::string filename_;
+        std::string last_error_;
 };
 
 struct CameraModeInfo
@@ -162,6 +200,7 @@ private:
         SessionState session_;
         CaptureSummary last_capture_;
         std::string last_camera_model_;
+        Mp4RecordingController mp4_controller_;
         HardwareInfo hardware_info_;
         std::string preview_pipeline_;
         std::string preview_client_pipeline_;

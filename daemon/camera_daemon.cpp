@@ -38,14 +38,13 @@
 #include "encoder/null_encoder.hpp"
 #include "metadata_config.hpp"
 #include "output/dng_output.hpp"
+#include "output/output.hpp"
 #include "preview/preview.hpp"
 
 namespace controls = libcamera::controls;
 namespace properties = libcamera::properties;
 
 namespace rpicam
-{
-namespace
 {
 
 class LibcameraCineDng : public RPiCamEncoder
@@ -195,6 +194,176 @@ std::string readCpuinfoField(const std::string &field)
                 }
         }
         return {};
+}
+
+Mp4RecordingStatus Mp4RecordingController::status() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        Mp4RecordingStatus current;
+        current.active = active_;
+        current.filename = filename_;
+        current.last_error = last_error_;
+        return current;
+}
+
+bool Mp4RecordingController::start(Mp4RecordingConfig const &config, CameraSettings const &settings,
+                                   std::string &error)
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_)
+        {
+                error = "MP4 recording already active";
+                return false;
+        }
+
+        if (config.filename.empty())
+        {
+                error = "Missing filename";
+                return false;
+        }
+
+        stop_flag_.store(false);
+        filename_ = config.filename;
+        last_error_.clear();
+
+        std::promise<bool> started;
+        std::future<bool> started_future = started.get_future();
+        thread_ = std::thread(&Mp4RecordingController::recordingThread, this, config, settings, std::move(started));
+
+        bool ok = started_future.get();
+        if (!ok)
+        {
+                if (thread_.joinable())
+                        thread_.join();
+                error = last_error_;
+                return false;
+        }
+
+        active_ = true;
+        return true;
+}
+
+bool Mp4RecordingController::stop(std::string &error)
+{
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!active_ && !thread_.joinable())
+        {
+                error = "No MP4 recording active";
+                return false;
+        }
+
+        stop_flag_.store(true);
+        std::shared_ptr<RPiCamEncoder> app = app_;
+        lock.unlock();
+        if (app)
+        {
+                RPiCamApp::MsgType quit = RPiCamApp::MsgType::Quit;
+                RPiCamApp::MsgPayload payload;
+                app->PostMessage(quit, payload);
+                app->StopCamera();
+        }
+
+        if (thread_.joinable())
+                thread_.join();
+
+        lock.lock();
+        active_ = false;
+        app_.reset();
+        return true;
+}
+
+void Mp4RecordingController::recordingThread(Mp4RecordingConfig config, CameraSettings settings,
+                                             std::promise<bool> started)
+{
+        bool started_set = false;
+        try
+        {
+                std::shared_ptr<RPiCamEncoder> app = std::make_shared<RPiCamEncoder>();
+                {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        app_ = app;
+                }
+                VideoOptions *options = app->GetOptions();
+                char arg0[] = "opendslm-daemon";
+                char *argv[] = { arg0 };
+                int argc = 1;
+                options->Parse(argc, argv);
+
+                options->nopreview = true;
+                options->preview = "0,0,0,0";
+                options->preview_stream.clear();
+                options->no_raw = true;
+                options->output = config.filename;
+                options->framerate = config.fps.value_or(settings.fps);
+                options->width = config.width.value_or(0);
+                options->height = config.height.value_or(0);
+                if (config.bitrate)
+                        options->bitrate.set(std::to_string(*config.bitrate) + "bps");
+                if (config.intra)
+                        options->intra = *config.intra;
+
+                app->OpenCamera();
+                app->ConfigureVideo();
+
+                StreamInfo vinfo;
+                libcamera::Stream *vstream = app->VideoStream(&vinfo);
+                if (!vstream)
+                        throw std::runtime_error("Video stream unavailable for MP4 recording");
+
+                std::unique_ptr<Output> output(Output::Create(options));
+                if (!output)
+                        throw std::runtime_error("Failed to create MP4 output sink");
+
+                app->SetEncodeOutputReadyCallback(
+                        [&output](void *mem, size_t size, int64_t ts, bool key) { output->OutputReady(mem, size, ts, key); });
+                app->SetMetadataReadyCallback(
+                        [&output](libcamera::ControlList &ctrls) { output->MetadataReady(ctrls); });
+
+                app->StartEncoder();
+                app->StartCamera();
+
+                started.set_value(true);
+                started_set = true;
+
+                while (!stop_flag_.load())
+                {
+                        RPiCamEncoder::Msg msg = app->Wait();
+                        if (msg.type == RPiCamApp::MsgType::Timeout)
+                                continue;
+                        if (msg.type == RPiCamEncoder::MsgType::Quit)
+                                break;
+                        if (msg.type != RPiCamEncoder::MsgType::RequestComplete)
+                                throw std::runtime_error("Unrecognised message from camera");
+
+                        CompletedRequestPtr &completed_request = std::get<CompletedRequestPtr>(msg.payload);
+                        app->EncodeBuffer(completed_request, vstream);
+                }
+
+                app->StopCamera();
+                app->StopEncoder();
+        }
+        catch (std::exception const &ex)
+        {
+                if (!started_set)
+                        started.set_value(false);
+                started_set = true;
+                {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        last_error_ = ex.what();
+                        active_ = false;
+                        app_.reset();
+                }
+                return;
+        }
+
+        if (!started_set)
+                started.set_value(true);
+
+        {
+                std::lock_guard<std::mutex> lock(mutex_);
+                active_ = false;
+                app_.reset();
+        }
 }
 
 std::string detectBoardModel()
@@ -603,11 +772,16 @@ bool CameraDaemon::stopSession(std::string &error_message)
 std::string CameraDaemon::buildStatusJson() const
 {
         std::lock_guard<std::mutex> lock(mutex_);
+        Mp4RecordingStatus mp4_status = mp4_controller_.status();
         std::ostringstream json;
         json << "{\"state\":{"
              << "\"active\":" << (session_.active ? "true" : "false")
              << ",\"mode\":" << jsonString(modeToString(session_.mode))
              << ",\"last_error\":" << jsonString(session_.last_error)
+             << "},\"recording\":{"
+             << "\"active\":" << (mp4_status.active ? "true" : "false")
+             << ",\"filename\":" << jsonString(mp4_status.filename)
+             << ",\"last_error\":" << jsonString(mp4_status.last_error)
              << "},\"settings\":" << buildSettingsJson(settings_, last_camera_model_)
              << ",\"preview_pipeline\":" << jsonString(preview_pipeline_)
              << ",\"preview_client_pipeline\":" << jsonString(preview_client_pipeline_)
@@ -1610,6 +1784,114 @@ void CameraDaemon::registerRoutes()
                         return response;
                 }
 
+                response.body = buildStatusJson();
+                return response;
+        });
+
+        server_.addHandler("POST", "/recordings/mp4/start", [this](HttpRequest const &request) {
+                HttpResponse response;
+                JsonObject values = parseJsonObject(request.body);
+                auto filename_it = values.find("filename");
+                if (filename_it == values.end())
+                {
+                        response.status_code = 400;
+                        response.body = "{\"error\":\"Missing field: filename\"}";
+                        return response;
+                }
+
+                auto filename = filename_it->second.asString();
+                if (!filename || filename->empty())
+                {
+                        response.status_code = 400;
+                        response.body = "{\"error\":\"filename must be a non-empty string\"}";
+                        return response;
+                }
+
+                auto parsePositiveInt = [&](const char *name, std::optional<unsigned int> &target) -> bool {
+                        auto it = values.find(name);
+                        if (it == values.end())
+                                return true;
+                        auto number = it->second.asNumber();
+                        if (!number || *number <= 0 || std::floor(*number) != *number)
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":" + jsonString(std::string(name) + " must be a positive integer") + "}";
+                                return false;
+                        }
+                        target = static_cast<unsigned int>(*number);
+                        return true;
+                };
+
+                Mp4RecordingConfig config;
+                config.filename = *filename;
+                if (!parsePositiveInt("width", config.width))
+                        return response;
+                if (!parsePositiveInt("height", config.height))
+                        return response;
+                if (!parsePositiveInt("bitrate", config.bitrate))
+                        return response;
+                if (!parsePositiveInt("intra", config.intra))
+                        return response;
+
+                if (auto it = values.find("fps"); it != values.end())
+                {
+                        auto number = it->second.asNumber();
+                        if (!number || *number <= 0)
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":\"fps must be a positive number\"}";
+                                return response;
+                        }
+                        config.fps = *number;
+                }
+
+                {
+                        std::lock_guard<std::mutex> lock(capture_mutex_);
+                        if (video_recording_)
+                        {
+                                response.status_code = 409;
+                                response.body = "{\"error\":\"RAW recording in progress\"}";
+                                return response;
+                        }
+                }
+
+                if (mp4_controller_.status().active)
+                {
+                        response.status_code = 409;
+                        response.body = "{\"error\":\"MP4 recording already active\"}";
+                        return response;
+                }
+
+                stopCameraLoop();
+
+                std::string error;
+                CameraSettings settings = getSettings();
+                if (!mp4_controller_.start(config, settings, error))
+                {
+                        startCameraLoop();
+                        if (error == "MP4 recording already active")
+                                response.status_code = 409;
+                        else
+                                response.status_code = 400;
+                        response.body = "{\"error\":" + jsonString(error.empty() ? std::string("Failed to start MP4 recording") : error) + "}";
+                        return response;
+                }
+
+                response.body = buildStatusJson();
+                return response;
+        });
+
+        server_.addHandler("POST", "/recordings/mp4/stop", [this](HttpRequest const &) {
+                HttpResponse response;
+                std::string error;
+                if (!mp4_controller_.stop(error))
+                {
+                        response.status_code = 409;
+                        response.body = "{\"error\":" + jsonString(error) + "}";
+                        return response;
+                }
+
+                startCameraLoop();
                 response.body = buildStatusJson();
                 return response;
         });
