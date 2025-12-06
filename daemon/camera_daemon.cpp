@@ -2192,7 +2192,7 @@ void CameraDaemon::registerRoutes()
                         if (!number || std::floor(*number) != *number)
                         {
                                 response.status_code = 400;
-                                response.body = "{\\\"error\\\":" + jsonString(std::string(name) + " must be an integer") + "}";
+                                response.body = "{\"error\":" + jsonString(std::string(name) + " must be an integer") + "}";
                                 return false;
                         }
                         target = static_cast<int>(*number);
@@ -2206,7 +2206,7 @@ void CameraDaemon::registerRoutes()
                         if (!str || (!allow_empty && str->empty()))
                         {
                                 response.status_code = 400;
-                                response.body = "{\\\"error\\\":" + jsonString(std::string(name) + " must be a string") + "}";
+                                response.body = "{\"error\":" + jsonString(std::string(name) + " must be a string") + "}";
                                 return false;
                         }
                         target = *str;
@@ -2220,7 +2220,7 @@ void CameraDaemon::registerRoutes()
                         if (!flag)
                         {
                                 response.status_code = 400;
-                                response.body = "{\\\"error\\\":" + jsonString(std::string(name) + " must be true or false") + "}";
+                                response.body = "{\"error\":" + jsonString(std::string(name) + " must be true or false") + "}";
                                 return false;
                         }
                         target = *flag;
@@ -2308,13 +2308,13 @@ void CameraDaemon::registerRoutes()
                         if (!str || str->empty())
                         {
                                 response.status_code = 400;
-                                response.body = "{\\\"error\\\":\"audio_source must be a string\"}";
+                                response.body = "{\"error\":\"audio_source must be a string\"}";
                                 return response;
                         }
                         if (*str != "pulse" && *str != "alsa")
                         {
                                 response.status_code = 400;
-                                response.body = "{\\\"error\\\":\"audio_source must be pulse or alsa\"}";
+                                response.body = "{\"error\":\"audio_source must be pulse or alsa\"}";
                                 return response;
                         }
                         config.audio_source = *str;
