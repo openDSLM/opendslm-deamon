@@ -209,6 +209,14 @@ Mp4RecordingStatus Mp4RecordingController::status() const
         current.fps = last_config_.fps;
         current.bitrate = last_config_.bitrate;
         current.intra = last_config_.intra;
+        current.audio_enabled = last_config_.audio_enabled;
+        current.audio_codec = last_config_.audio_codec;
+        current.audio_source = last_config_.audio_source;
+        current.audio_device = last_config_.audio_device;
+        current.audio_channels = last_config_.audio_channels;
+        current.audio_bitrate = last_config_.audio_bitrate;
+        current.audio_samplerate = last_config_.audio_samplerate;
+        current.audio_sync_us = last_config_.audio_sync_us;
         return current;
 }
 
@@ -228,14 +236,37 @@ bool Mp4RecordingController::start(Mp4RecordingConfig const &config, CameraSetti
                 return false;
         }
 
+        Mp4RecordingConfig effective = config;
+        if (effective.audio_enabled)
+        {
+                if (!effective.audio_codec)
+                        effective.audio_codec = "aac";
+                if (!effective.audio_source)
+                        effective.audio_source = "pulse";
+                if (!effective.audio_device)
+                        effective.audio_device = "default";
+                if (!effective.audio_bitrate)
+                        effective.audio_bitrate = 32000;
+        }
+        else
+        {
+                effective.audio_codec.reset();
+                effective.audio_source.reset();
+                effective.audio_device.reset();
+                effective.audio_channels.reset();
+                effective.audio_bitrate.reset();
+                effective.audio_samplerate.reset();
+                effective.audio_sync_us.reset();
+        }
+
         stop_flag_.store(false);
-        filename_ = config.filename;
-        last_config_ = config;
+        filename_ = effective.filename;
+        last_config_ = effective;
         last_error_.clear();
 
         std::promise<bool> started;
         std::future<bool> started_future = started.get_future();
-        thread_ = std::thread(&Mp4RecordingController::recordingThread, this, config, settings, preview_pipeline,
+        thread_ = std::thread(&Mp4RecordingController::recordingThread, this, effective, settings, preview_pipeline,
                               std::move(started));
 
         bool ok = started_future.get();
@@ -331,6 +362,24 @@ void Mp4RecordingController::recordingThread(Mp4RecordingConfig config, CameraSe
                         options->bitrate.set(std::to_string(*config.bitrate) + "bps");
                 if (config.intra)
                         options->intra = *config.intra;
+                options->libav_audio = config.audio_enabled;
+                if (options->libav_audio)
+                {
+                        if (config.audio_codec)
+                                options->audio_codec = *config.audio_codec;
+                        if (config.audio_source)
+                                options->audio_source = *config.audio_source;
+                        if (config.audio_device)
+                                options->audio_device = *config.audio_device;
+                        if (config.audio_channels)
+                                options->audio_channels = *config.audio_channels;
+                        if (config.audio_bitrate)
+                                options->audio_bitrate.set(std::to_string(*config.audio_bitrate) + "bps");
+                        if (config.audio_samplerate)
+                                options->audio_samplerate = *config.audio_samplerate;
+                        if (config.audio_sync_us)
+                                options->av_sync.value = std::chrono::microseconds(*config.audio_sync_us);
+                }
 
                 app->OpenCamera();
                 app->ConfigureVideo();
@@ -833,6 +882,13 @@ std::string CameraDaemon::buildStatusJson() const
                 else
                         json << "null";
         };
+        auto writeOptionalString = [&json](const char *name, auto const &value) {
+                json << "\"" << name << "\":";
+                if (value)
+                        json << jsonString(*value);
+                else
+                        json << "null";
+        };
         json << "{\"state\":{"
              << "\"active\":" << (session_.active ? "true" : "false")
              << ",\"mode\":" << jsonString(modeToString(session_.mode))
@@ -852,6 +908,26 @@ std::string CameraDaemon::buildStatusJson() const
         writeOptionalNumber("bitrate", mp4_status.bitrate);
         json << ',';
         writeOptionalNumber("intra", mp4_status.intra);
+        json << "},\"audio\":";
+        json << "{";
+        json << "\"enabled\":" << (mp4_status.audio_enabled ? "true" : "false") << ',';
+        writeOptionalString("codec", mp4_status.audio_codec);
+        json << ',';
+        writeOptionalString("source", mp4_status.audio_source);
+        json << ',';
+        writeOptionalString("device", mp4_status.audio_device);
+        json << ',';
+        writeOptionalNumber("channels", mp4_status.audio_channels);
+        json << ',';
+        writeOptionalNumber("bitrate", mp4_status.audio_bitrate);
+        json << ',';
+        writeOptionalNumber("samplerate", mp4_status.audio_samplerate);
+        json << ',';
+        json << "\"sync_us\":";
+        if (mp4_status.audio_sync_us)
+                json << *mp4_status.audio_sync_us;
+        else
+                json << "null";
         json << "}";
         json << "},\"settings\":" << buildSettingsJson(settings_, last_camera_model_)
              << ",\"preview_pipeline\":" << jsonString(preview_pipeline_)
@@ -865,7 +941,6 @@ std::string CameraDaemon::buildStatusJson() const
         json << "}";
         return json.str();
 }
-
 std::string CameraDaemon::buildSettingsJson(CameraSettings const &settings,
                                             std::string const &camera_model) const
 {
@@ -1898,9 +1973,56 @@ void CameraDaemon::registerRoutes()
                         target = static_cast<unsigned int>(*number);
                         return true;
                 };
+                auto parseSignedInt = [&](const char *name, std::optional<int> &target) -> bool {
+                        auto it = values.find(name);
+                        if (it == values.end())
+                                return true;
+                        auto number = it->second.asNumber();
+                        if (!number || std::floor(*number) != *number)
+                        {
+                                response.status_code = 400;
+                                response.body = "{\\\"error\\\":" + jsonString(std::string(name) + " must be an integer") + "}";
+                                return false;
+                        }
+                        target = static_cast<int>(*number);
+                        return true;
+                };
+                auto parseStringField = [&](const char *name, std::optional<std::string> &target, bool allow_empty = false) -> bool {
+                        auto it = values.find(name);
+                        if (it == values.end())
+                                return true;
+                        auto str = it->second.asString();
+                        if (!str || (!allow_empty && str->empty()))
+                        {
+                                response.status_code = 400;
+                                response.body = "{\\\"error\\\":" + jsonString(std::string(name) + " must be a string") + "}";
+                                return false;
+                        }
+                        target = *str;
+                        return true;
+                };
+                auto parseBoolField = [&](const char *name, bool &target) -> bool {
+                        auto it = values.find(name);
+                        if (it == values.end())
+                                return true;
+                        auto flag = it->second.asBool();
+                        if (!flag)
+                        {
+                                response.status_code = 400;
+                                response.body = "{\\\"error\\\":" + jsonString(std::string(name) + " must be true or false") + "}";
+                                return false;
+                        }
+                        target = *flag;
+                        return true;
+                };
 
                 Mp4RecordingConfig config;
                 config.filename = *filename;
+                config.audio_enabled = true;
+                config.audio_codec = "aac";
+                config.audio_source = "pulse";
+                config.audio_device = "default";
+                config.audio_bitrate = 32000;
                 if (!parsePositiveInt("width", config.width))
                         return response;
                 if (!parsePositiveInt("height", config.height))
@@ -1909,6 +2031,47 @@ void CameraDaemon::registerRoutes()
                         return response;
                 if (!parsePositiveInt("intra", config.intra))
                         return response;
+                if (!parseBoolField("audio", config.audio_enabled))
+                        return response;
+                if (!parseStringField("audio_codec", config.audio_codec))
+                        return response;
+                if (!parseStringField("audio_device", config.audio_device))
+                        return response;
+                if (!parsePositiveInt("audio_bitrate", config.audio_bitrate))
+                        return response;
+                if (!parsePositiveInt("audio_samplerate", config.audio_samplerate))
+                        return response;
+                if (!parsePositiveInt("audio_channels", config.audio_channels))
+                        return response;
+                if (!parseSignedInt("audio_sync_us", config.audio_sync_us))
+                        return response;
+                if (auto it = values.find("audio_source"); it != values.end())
+                {
+                        auto str = it->second.asString();
+                        if (!str || str->empty())
+                        {
+                                response.status_code = 400;
+                                response.body = "{\\\"error\\\":\"audio_source must be a string\"}";
+                                return response;
+                        }
+                        if (*str != "pulse" && *str != "alsa")
+                        {
+                                response.status_code = 400;
+                                response.body = "{\\\"error\\\":\"audio_source must be pulse or alsa\"}";
+                                return response;
+                        }
+                        config.audio_source = *str;
+                }
+                if (!config.audio_enabled)
+                {
+                        config.audio_codec.reset();
+                        config.audio_source.reset();
+                        config.audio_device.reset();
+                        config.audio_channels.reset();
+                        config.audio_bitrate.reset();
+                        config.audio_samplerate.reset();
+                        config.audio_sync_us.reset();
+                }
 
                 if (auto it = values.find("fps"); it != values.end())
                 {

@@ -77,6 +77,14 @@ struct Mp4RecordingStatus
         std::optional<double> fps;
         std::optional<unsigned int> bitrate;
         std::optional<unsigned int> intra;
+        bool audio_enabled = true;
+        std::optional<std::string> audio_codec;
+        std::optional<std::string> audio_source;
+        std::optional<std::string> audio_device;
+        std::optional<unsigned int> audio_channels;
+        std::optional<unsigned int> audio_bitrate;
+        std::optional<unsigned int> audio_samplerate;
+        std::optional<int> audio_sync_us;
 };
 
 struct Mp4RecordingConfig
@@ -87,6 +95,14 @@ struct Mp4RecordingConfig
         std::optional<double> fps;
         std::optional<unsigned int> bitrate;
         std::optional<unsigned int> intra;
+        bool audio_enabled = true;
+        std::optional<std::string> audio_codec;
+        std::optional<std::string> audio_source;
+        std::optional<std::string> audio_device;
+        std::optional<unsigned int> audio_channels;
+        std::optional<unsigned int> audio_bitrate;
+        std::optional<unsigned int> audio_samplerate;
+        std::optional<int> audio_sync_us;
 };
 
 class Mp4RecordingController

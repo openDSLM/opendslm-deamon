@@ -83,6 +83,14 @@ payload now also contains a `hardware` block that mirrors `GET /hardware`
 described below, so most clients only need a single request to populate camera
 settings and available resolutions.
 
+`recording` contains the MP4 controller status with the last requested
+parameters. The `config` sub-object surfaces the requested `width`, `height`,
+`fps`, `bitrate`, and `intra` (GOP length; set to `1` for All-Intra, leave unset
+to use the encoder default GOP). The `audio` sub-object reports whether audio is
+enabled along with the chosen `codec`, `source` (`pulse` or `alsa`), `device`,
+`channels`, `bitrate` (bps), `samplerate` (Hz), and `sync_us` offset applied to
+the audio track.
+
 ### `GET /hardware`
 
 Returns a snapshot of the detected platform and all attached sensors. A typical
@@ -194,6 +202,47 @@ wrong mid-capture you must clean up the partially written DNG files manually.
 ### `DELETE /recordings/video`
 
 Stops the active video recording. Returns HTTP 409 if nothing is running.
+
+### `POST /recordings/mp4/start`
+
+Starts an MP4 recording using the hardware encoder and the preview pipeline
+configured for YUV420. Parameters (all optional except `filename`):
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `filename` | string | Required output path. `.mp4` containers are muxed; `.h265`/`.hevc` switches the encoder to HEVC. |
+| `width` / `height` | int | Override video resolution; defaults to the current camera mode. |
+| `fps` | float | Requested frame rate; capped to the probed sensor limit and mirrored to the preview caps. |
+| `bitrate` | int | Target video bitrate in bits per second. |
+| `intra` | int | GOP length; set to `1` for All-Intra or leave unset for long-GOP. |
+| `audio` | bool | Enable/disable audio (default `true`). |
+| `audio_codec` | string | Audio codec passed to libav (default `aac`). |
+| `audio_source` | string | `pulse` or `alsa` (default `pulse`). |
+| `audio_device` | string | Device name for the chosen source (default `default`). |
+| `audio_channels` | int | Number of channels; omit to use the source default. |
+| `audio_bitrate` | int | Audio bitrate in bits per second (default 32000). |
+| `audio_samplerate` | int | Audio sample rate in Hz; omit to follow the source. |
+| `audio_sync_us` | int | Microsecond offset applied to audio relative to video (positive or negative). |
+
+The daemon rejects requests if a RAW recording is running, if an MP4 capture is
+already active, or if the encoder/muxer cannot be initialised.
+
+### `POST /recordings/mp4/stop`
+
+Stops the active MP4 recording and returns the updated `/status` payload.
+Returns HTTP 409 if nothing is running.
+
+### Audio level overlay notes
+
+Audio is captured via libav and not exposed in the preview stream. If you need
+live meters in your UI, run a sidecar GStreamer probe against the same Pulse
+source and listen for `level` element messages. Example:
+
+```bash
+gst-launch-1.0 -q pulsesrc device=default ! level interval=100000000 ! fakesink silent=true
+```
+
+Parse the bus `level` messages for RMS/peak data and overlay them in the UI.
 
 ### `GET /preview`
 
