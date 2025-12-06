@@ -48,6 +48,16 @@ to customise the recommended client pipeline. Preview overlays (focus peaking,
 zebras, etc.) live under `post_processing_stages/assist/` and can be enabled via
 the existing post-processing pipeline configuration.
 
+### Where image processing happens
+
+All ISP processing (AWB, denoise, sharpening, colour correction) happens inside
+libcamera before frames reach the daemon’s `appsrc`. The shared preview/feed
+already carries those adjustments, so you can tee the same source into a
+recording branch without losing manual ISO/shutter/white balance controls. If
+you need a different look for recording, add a downstream colour-conversion or
+encoding branch in the GStreamer pipeline after the `appsrc` rather than trying
+to bypass the ISP.
+
 ### Gtk UI integration
 
 The daemon is the backend for the
