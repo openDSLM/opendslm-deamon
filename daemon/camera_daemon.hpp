@@ -72,6 +72,11 @@ struct Mp4RecordingStatus
         bool active = false;
         std::string filename;
         std::string last_error;
+        std::optional<unsigned int> width;
+        std::optional<unsigned int> height;
+        std::optional<double> fps;
+        std::optional<unsigned int> bitrate;
+        std::optional<unsigned int> intra;
 };
 
 struct Mp4RecordingConfig
@@ -99,6 +104,7 @@ private:
         std::atomic<bool> stop_flag_{false};
         std::shared_ptr<RPiCamEncoder> app_;
         bool active_ = false;
+        Mp4RecordingConfig last_config_;
         std::string filename_;
         std::string last_error_;
 };

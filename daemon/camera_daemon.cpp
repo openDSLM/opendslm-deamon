@@ -203,6 +203,11 @@ Mp4RecordingStatus Mp4RecordingController::status() const
         current.active = active_;
         current.filename = filename_;
         current.last_error = last_error_;
+        current.width = last_config_.width;
+        current.height = last_config_.height;
+        current.fps = last_config_.fps;
+        current.bitrate = last_config_.bitrate;
+        current.intra = last_config_.intra;
         return current;
 }
 
@@ -224,6 +229,7 @@ bool Mp4RecordingController::start(Mp4RecordingConfig const &config, CameraSetti
 
         stop_flag_.store(false);
         filename_ = config.filename;
+        last_config_ = config;
         last_error_.clear();
 
         std::promise<bool> started;
@@ -268,6 +274,7 @@ bool Mp4RecordingController::stop(std::string &error)
 
         lock.lock();
         active_ = false;
+        last_config_ = Mp4RecordingConfig();
         app_.reset();
         return true;
 }
@@ -774,6 +781,13 @@ std::string CameraDaemon::buildStatusJson() const
         std::lock_guard<std::mutex> lock(mutex_);
         Mp4RecordingStatus mp4_status = mp4_controller_.status();
         std::ostringstream json;
+        auto writeOptionalNumber = [&json](const char *name, auto const &value) {
+                json << "\"" << name << "\":";
+                if (value)
+                        json << *value;
+                else
+                        json << "null";
+        };
         json << "{\"state\":{"
              << "\"active\":" << (session_.active ? "true" : "false")
              << ",\"mode\":" << jsonString(modeToString(session_.mode))
@@ -782,7 +796,19 @@ std::string CameraDaemon::buildStatusJson() const
              << "\"active\":" << (mp4_status.active ? "true" : "false")
              << ",\"filename\":" << jsonString(mp4_status.filename)
              << ",\"last_error\":" << jsonString(mp4_status.last_error)
-             << "},\"settings\":" << buildSettingsJson(settings_, last_camera_model_)
+             << ",\"config\":";
+        json << "{";
+        writeOptionalNumber("width", mp4_status.width);
+        json << ',';
+        writeOptionalNumber("height", mp4_status.height);
+        json << ',';
+        writeOptionalNumber("fps", mp4_status.fps);
+        json << ',';
+        writeOptionalNumber("bitrate", mp4_status.bitrate);
+        json << ',';
+        writeOptionalNumber("intra", mp4_status.intra);
+        json << "}";
+        json << "},\"settings\":" << buildSettingsJson(settings_, last_camera_model_)
              << ",\"preview_pipeline\":" << jsonString(preview_pipeline_)
              << ",\"preview_client_pipeline\":" << jsonString(preview_client_pipeline_)
              << ",\"last_capture\":";
