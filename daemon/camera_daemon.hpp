@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <future>
 #include <memory>
@@ -43,6 +44,15 @@ struct CameraSettings
         bool auto_exposure = true;
         std::string output_dir = "/ssd/RAW";
         std::string mode;
+        float contrast = 1.0f;
+        float saturation = 1.0f;
+        float sharpness = 1.0f;
+        float brightness = 0.0f;
+        std::string denoise = "auto";
+        std::string awb_mode = "auto";
+        double awb_gain_r = 0.0;
+        double awb_gain_b = 0.0;
+        std::string tuning_file = "-";
         MetadataSettings metadata;
 };
 
@@ -77,6 +87,15 @@ struct Mp4RecordingStatus
         std::optional<double> fps;
         std::optional<unsigned int> bitrate;
         std::optional<unsigned int> intra;
+        std::optional<std::string> codec;
+        std::optional<std::string> profile;
+        std::optional<std::string> level;
+        bool inline_headers = false;
+        std::optional<unsigned int> frames;
+        std::optional<std::string> save_pts;
+        std::optional<unsigned int> segment_ms;
+        bool split = false;
+        std::optional<uint64_t> elapsed_ms;
         bool audio_enabled = true;
         std::optional<std::string> audio_codec;
         std::optional<std::string> audio_source;
@@ -95,6 +114,14 @@ struct Mp4RecordingConfig
         std::optional<double> fps;
         std::optional<unsigned int> bitrate;
         std::optional<unsigned int> intra;
+        std::optional<std::string> codec;
+        std::optional<std::string> profile;
+        std::optional<std::string> level;
+        bool inline_headers = false;
+        std::optional<unsigned int> frames;
+        std::optional<std::string> save_pts;
+        std::optional<unsigned int> segment_ms;
+        bool split = false;
         bool audio_enabled = true;
         std::optional<std::string> audio_codec;
         std::optional<std::string> audio_source;
@@ -125,6 +152,7 @@ private:
         Mp4RecordingConfig last_config_;
         std::string filename_;
         std::string last_error_;
+        std::optional<std::chrono::steady_clock::time_point> start_time_;
 };
 
 struct CameraModeInfo

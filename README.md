@@ -36,8 +36,12 @@ remain valid:
 The daemon powers the [openDSLM GTK UI](https://github.com/openDSLM/gtk-ui), and
 current UI builds expect the HTTP API documented here. Start `opendslm-daemon`
 before launching the GTK client so it can attach to `/status`, `/settings`,
-`/preview`, and the GStreamer shared memory endpoints. If you change ports or
-socket paths, export matching overrides for the UI environment variables.
+`/preview`, and the GStreamer shared memory endpoints. GTK record/stop buttons
+should call `/recordings/mp4/start` and `/recordings/mp4/stop`, bubble up any
+errors (RAW conflicts, unsupported codecs, encoder failures), and reflect the
+`/status` fields for filename, elapsed time, codec, bitrate, GOP mode, and
+whether audio is active. If you change ports or socket paths, export matching
+overrides for the UI environment variables.
 
 ## Compatibility (alpha)
 
