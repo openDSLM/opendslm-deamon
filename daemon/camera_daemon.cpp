@@ -487,6 +487,27 @@ std::string formatDouble(double value)
 
 } // namespace
 
+double CameraDaemon::capFrameRate(double requested) const
+{
+        if (requested <= 0.0)
+                return requested;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        double max_fps = 0.0;
+        for (auto const &camera : hardware_info_.cameras)
+        {
+                if (!last_camera_model_.empty() && camera.model != last_camera_model_ && camera.id != last_camera_model_)
+                        continue;
+                for (auto const &mode : camera.modes)
+                        max_fps = std::max(max_fps, mode.max_fps);
+        }
+
+        if (max_fps > 0.0 && requested > max_fps)
+                return max_fps;
+
+        return requested;
+}
+
 CameraDaemon::CameraDaemon()
 {
         settings_.metadata.make = ODS_DEFAULT_MAKE;
@@ -1539,6 +1560,12 @@ void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoO
         options.output = request_raw ? settings.output_dir : std::string();
         options.framerate = settings.fps;
 
+        if (!options.preview_gstreamer.empty())
+        {
+                options.lores_width = options.viewfinder_width;
+                options.lores_height = options.viewfinder_height;
+        }
+
         if (!settings.mode.empty())
         {
                 options.mode_string = settings.mode;
@@ -1916,6 +1943,9 @@ void CameraDaemon::registerRoutes()
 
                 std::string error;
                 CameraSettings settings = getSettings();
+                if (!config.fps)
+                        config.fps = settings.fps;
+                config.fps = capFrameRate(*config.fps);
                 if (!mp4_controller_.start(config, settings, previewPipeline(), error))
                 {
                         startCameraLoop();
@@ -2034,6 +2064,7 @@ void CameraDaemon::cameraLoop()
 
                         CameraSettings settings = getSettings();
                         applySettingsToOptions(settings, *options, true /* request raw */);
+                        options->framerate = capFrameRate(options->framerate);
 
                 std::string dng_output = settings.output_dir;
                 {
@@ -2162,7 +2193,7 @@ void CameraDaemon::cameraLoop()
                                                 caps << kCapsToken;
                                                 if (vinfo.width && vinfo.height)
                                                         caps << ",width=" << vinfo.width << ",height=" << vinfo.height;
-                                                double fps_value = settings.fps;
+                                                double fps_value = options->framerate;
                                                 if (fps_value > 0.0)
                                                 {
                                                         long fps_scaled = std::lround(fps_value * 1000.0);

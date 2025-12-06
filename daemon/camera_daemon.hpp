@@ -163,6 +163,8 @@ public:
         bool stopSession(std::string &error_message);
 
 private:
+        double capFrameRate(double requested) const;
+
         struct CaptureResult
         {
                 bool success = false;

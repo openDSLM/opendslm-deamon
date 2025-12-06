@@ -118,6 +118,9 @@ gst-launch-1.0 shmsrc socket-path=/tmp/opendslm-preview.sock is-live=true do-tim
   queue max-size-buffers=2 leaky=downstream ! video/x-raw,format=RGBA ! autovideosink
 ```
 
+The daemon's default preview pipeline inserts one or two `queue` elements ahead of the shared-memory sink to absorb jitter from
+MP4 encoding. Set `ODS_PREVIEW_EXTRA_QUEUE=0` if you want to drop the second queue for a tighter latency budget.
+
 ## Preview assist stages
 
 The daemon exposes a dedicated directory for preview assist post-processing
