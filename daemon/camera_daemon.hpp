@@ -92,12 +92,14 @@ struct Mp4RecordingConfig
 class Mp4RecordingController
 {
 public:
-        bool start(Mp4RecordingConfig const &config, CameraSettings const &settings, std::string &error);
+        bool start(Mp4RecordingConfig const &config, CameraSettings const &settings,
+                   std::string const &preview_pipeline, std::string &error);
         bool stop(std::string &error);
         Mp4RecordingStatus status() const;
 
 private:
-        void recordingThread(Mp4RecordingConfig config, CameraSettings settings, std::promise<bool> started);
+        void recordingThread(Mp4RecordingConfig config, CameraSettings settings, std::string preview_pipeline,
+                             std::promise<bool> started);
 
         mutable std::mutex mutex_;
         std::thread thread_;

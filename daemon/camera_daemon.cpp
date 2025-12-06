@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <string_view>
 #include <cmath>
 #include <cctype>
 #include <cstdlib>
@@ -212,7 +213,7 @@ Mp4RecordingStatus Mp4RecordingController::status() const
 }
 
 bool Mp4RecordingController::start(Mp4RecordingConfig const &config, CameraSettings const &settings,
-                                   std::string &error)
+                                   std::string const &preview_pipeline, std::string &error)
 {
         std::lock_guard<std::mutex> lock(mutex_);
         if (active_)
@@ -234,7 +235,8 @@ bool Mp4RecordingController::start(Mp4RecordingConfig const &config, CameraSetti
 
         std::promise<bool> started;
         std::future<bool> started_future = started.get_future();
-        thread_ = std::thread(&Mp4RecordingController::recordingThread, this, config, settings, std::move(started));
+        thread_ = std::thread(&Mp4RecordingController::recordingThread, this, config, settings, preview_pipeline,
+                              std::move(started));
 
         bool ok = started_future.get();
         if (!ok)
@@ -280,7 +282,7 @@ bool Mp4RecordingController::stop(std::string &error)
 }
 
 void Mp4RecordingController::recordingThread(Mp4RecordingConfig config, CameraSettings settings,
-                                             std::promise<bool> started)
+                                             std::string preview_pipeline, std::promise<bool> started)
 {
         bool started_set = false;
         try
@@ -296,9 +298,30 @@ void Mp4RecordingController::recordingThread(Mp4RecordingConfig config, CameraSe
                 int argc = 1;
                 options->Parse(argc, argv);
 
-                options->nopreview = true;
+                options->codec = "libav";
+                options->libav_format = "mp4";
+                options->libav_video_codec = "h264_v4l2m2m";
+                std::string output_lower = config.filename;
+                std::transform(output_lower.begin(), output_lower.end(), output_lower.begin(), [](unsigned char c) {
+                        return static_cast<char>(std::tolower(c));
+                });
+                auto hasSuffix = [&output_lower](std::string_view suffix) {
+                        return output_lower.size() >= suffix.size()
+                                && output_lower.rfind(suffix.data(), output_lower.size() - suffix.size())
+                                           == output_lower.size() - suffix.size();
+                };
+                if (hasSuffix(".hevc") || hasSuffix(".h265"))
+                        options->libav_video_codec = "hevc_v4l2m2m";
+
+                options->nopreview = false;
                 options->preview = "0,0,0,0";
-                options->preview_stream.clear();
+                options->preview_gstreamer = preview_pipeline;
+                options->viewfinder_buffer_count = 2;
+                options->buffer_count = 6;
+                options->viewfinder_width = 640;
+                options->viewfinder_height = 360;
+                options->lores_width = options->viewfinder_width;
+                options->lores_height = options->viewfinder_height;
                 options->no_raw = true;
                 options->output = config.filename;
                 options->framerate = config.fps.value_or(settings.fps);
@@ -348,6 +371,7 @@ void Mp4RecordingController::recordingThread(Mp4RecordingConfig config, CameraSe
 
                 app->StopCamera();
                 app->StopEncoder();
+                output.reset();
         }
         catch (std::exception const &ex)
         {
@@ -1892,7 +1916,7 @@ void CameraDaemon::registerRoutes()
 
                 std::string error;
                 CameraSettings settings = getSettings();
-                if (!mp4_controller_.start(config, settings, error))
+                if (!mp4_controller_.start(config, settings, previewPipeline(), error))
                 {
                         startCameraLoop();
                         if (error == "MP4 recording already active")
