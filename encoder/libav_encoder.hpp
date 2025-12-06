@@ -50,7 +50,9 @@ private:
 	void encode(AVPacket *pkt, unsigned int stream_id);
 
 	void videoThread();
-	void audioThread();
+        void audioThread();
+        void applyAudioGain(uint8_t **samples, int num_samples, int channels, AVSampleFormat fmt);
+        void updateAutoGain(double rms_level);
 
 	static void releaseBuffer(void *opaque, uint8_t *data);
 
@@ -75,8 +77,12 @@ private:
 	AVFormatContext *out_fmt_ctx_;
 
 	std::mutex drm_queue_lock_;
-	std::queue<std::unique_ptr<AVDRMFrameDescriptor>> drm_frame_queue_;
+        std::queue<std::unique_ptr<AVDRMFrameDescriptor>> drm_frame_queue_;
 
-	std::string output_file_;
-	bool output_initialised_;
+        std::string output_file_;
+        bool output_initialised_;
+
+        double audio_gain_linear_ = 1.0;
+        double audio_agc_gain_ = 1.0;
+        bool audio_auto_gain_ = false;
 };

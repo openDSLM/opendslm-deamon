@@ -104,6 +104,8 @@ struct Mp4RecordingStatus
         std::optional<unsigned int> audio_bitrate;
         std::optional<unsigned int> audio_samplerate;
         std::optional<int> audio_sync_us;
+        bool audio_auto_gain = false;
+        std::optional<double> audio_gain_db;
 };
 
 struct Mp4RecordingConfig
@@ -130,6 +132,8 @@ struct Mp4RecordingConfig
         std::optional<unsigned int> audio_bitrate;
         std::optional<unsigned int> audio_samplerate;
         std::optional<int> audio_sync_us;
+        bool audio_auto_gain = false;
+        std::optional<double> audio_gain_db;
 };
 
 class Mp4RecordingController

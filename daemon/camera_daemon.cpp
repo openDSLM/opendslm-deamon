@@ -231,6 +231,8 @@ Mp4RecordingStatus Mp4RecordingController::status() const
         current.audio_bitrate = last_config_.audio_bitrate;
         current.audio_samplerate = last_config_.audio_samplerate;
         current.audio_sync_us = last_config_.audio_sync_us;
+        current.audio_auto_gain = last_config_.audio_auto_gain;
+        current.audio_gain_db = last_config_.audio_gain_db;
         return current;
 }
 
@@ -261,6 +263,8 @@ bool Mp4RecordingController::start(Mp4RecordingConfig const &config, CameraSetti
                         effective.audio_device = "default";
                 if (!effective.audio_bitrate)
                         effective.audio_bitrate = 32000;
+                if (!effective.audio_gain_db)
+                        effective.audio_gain_db = 0.0;
         }
         else
         {
@@ -271,6 +275,8 @@ bool Mp4RecordingController::start(Mp4RecordingConfig const &config, CameraSetti
                 effective.audio_bitrate.reset();
                 effective.audio_samplerate.reset();
                 effective.audio_sync_us.reset();
+                effective.audio_gain_db.reset();
+                effective.audio_auto_gain = false;
         }
 
         stop_flag_.store(false);
@@ -429,6 +435,9 @@ void Mp4RecordingController::recordingThread(Mp4RecordingConfig config, CameraSe
                                 options->audio_samplerate = *config.audio_samplerate;
                         if (config.audio_sync_us)
                                 options->av_sync.value = std::chrono::microseconds(*config.audio_sync_us);
+                        options->audio_auto_gain = config.audio_auto_gain;
+                        if (config.audio_gain_db)
+                                options->audio_gain_db = *config.audio_gain_db;
                 }
 
                 app->OpenCamera();
@@ -1111,6 +1120,9 @@ std::string CameraDaemon::buildStatusJson() const
         writeOptionalNumber("bitrate", mp4_status.audio_bitrate);
         json << ',';
         writeOptionalNumber("samplerate", mp4_status.audio_samplerate);
+        json << ',';
+        json << "\"auto_gain\":" << (mp4_status.audio_auto_gain ? "true" : "false") << ',';
+        writeOptionalNumber("gain_db", mp4_status.audio_gain_db);
         json << ',';
         json << "\"sync_us\":";
         if (mp4_status.audio_sync_us)
@@ -2226,6 +2238,20 @@ void CameraDaemon::registerRoutes()
                         target = *flag;
                         return true;
                 };
+                auto parseDoubleField = [&](const char *name, std::optional<double> &target) -> bool {
+                        auto it = values.find(name);
+                        if (it == values.end())
+                                return true;
+                        auto number = it->second.asNumber();
+                        if (!number)
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":" + jsonString(std::string(name) + " must be a number") + "}"; 
+                                return false;
+                        }
+                        target = *number;
+                        return true;
+                };
 
                 Mp4RecordingConfig config;
                 config.filename = *filename;
@@ -2277,6 +2303,10 @@ void CameraDaemon::registerRoutes()
                 if (!parseSignedInt("audio_sync_us", config.audio_sync_us))
                         return response;
                 if (!parseSignedInt("av_sync", config.audio_sync_us))
+                        return response;
+                if (!parseBoolField("audio_auto_gain", config.audio_auto_gain))
+                        return response;
+                if (!parseDoubleField("audio_gain_db", config.audio_gain_db))
                         return response;
                 if (config.codec)
                 {

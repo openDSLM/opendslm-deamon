@@ -89,10 +89,10 @@ parameters. The `config` sub-object surfaces the requested `width`, `height`,
 `level`, `inline` (write SPS/PPS on every I‑frame), `frames`, and rolling
 options (`save_pts`, `segment`, `split`). The `audio` sub-object reports whether
 audio is enabled along with the chosen `codec`, `source` (`pulse` or `alsa`),
-`device`, `channels`, `bitrate` (bps), `samplerate` (Hz), and `sync_us`/`av_sync`
-offset applied to the audio track. When recording is live, `elapsed_ms` counts
-how long the encoder has been running and `filename` echoes the active clip
-name.
+`device`, `channels`, `bitrate` (bps), `samplerate` (Hz), `auto_gain`/`gain_db`,
+and `sync_us`/`av_sync` offset applied to the audio track. When recording is
+live, `elapsed_ms` counts how long the encoder has been running and `filename`
+echoes the active clip name.
 
 ### `GET /hardware`
 
@@ -232,6 +232,8 @@ configured for YUV420. Parameters (all optional except `filename`):
 | `audio_channels` | int | Number of channels; omit to use the source default. |
 | `audio_bitrate` | int | Audio bitrate in bits per second (default 32000). |
 | `audio_samplerate` | int | Audio sample rate in Hz; omit to follow the source. |
+| `audio_auto_gain` | bool | Enable lightweight AGC on the audio input (default `false`). |
+| `audio_gain_db` | float | Apply a fixed pre-encode gain in decibels (default `0.0`). |
 | `audio_sync_us` / `av_sync` | int | Microsecond offset applied to audio relative to video (positive or negative). |
 
 The daemon rejects requests if a RAW recording is running, if an MP4 capture is

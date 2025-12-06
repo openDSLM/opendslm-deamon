@@ -153,8 +153,12 @@ struct VideoOptions : public Options
 			 "Number of channels to use for recording audio. Set to 0 to use default value.")
 			("audio-bitrate", value<std::string>(&audio_bitrate_)->default_value("32kbps"),
 			 "Set the audio bitrate for encoding. If no units are provided, default to bits/second.")
-			("audio-samplerate", value<uint32_t>(&audio_samplerate)->default_value(0),
-			 "Set the audio sampling rate in Hz for encoding. Set to 0 to use the input sample rate.")
+                        ("audio-samplerate", value<uint32_t>(&audio_samplerate)->default_value(0),
+                         "Set the audio sampling rate in Hz for encoding. Set to 0 to use the input sample rate.")
+                        ("audio-auto-gain", value<bool>(&audio_auto_gain)->default_value(false)->implicit_value(true),
+                         "Enable a lightweight automatic gain control for audio inputs (libav only)")
+                        ("audio-gain-db", value<double>(&audio_gain_db)->default_value(0.0),
+                         "Apply a fixed gain in dB to the incoming audio before encoding (libav only)")
 			("av-sync", value<std::string>(&av_sync_)->default_value("0us"),
 			 "Add a time offset (in microseconds if no units provided) to the audio stream, relative to the video stream. "
 			 "The offset value can be either positive or negative.")
@@ -178,12 +182,14 @@ struct VideoOptions : public Options
 	std::string libav_format;
 	bool libav_audio;
 	std::string audio_codec;
-	std::string audio_device;
-	std::string audio_source;
-	uint32_t audio_channels;
-	Bitrate audio_bitrate;
-	uint32_t audio_samplerate;
-	TimeVal<std::chrono::microseconds> av_sync;
+        std::string audio_device;
+        std::string audio_source;
+        uint32_t audio_channels;
+        Bitrate audio_bitrate;
+        uint32_t audio_samplerate;
+        bool audio_auto_gain = false;
+        double audio_gain_db = 0.0;
+        TimeVal<std::chrono::microseconds> av_sync;
 	std::string save_pts;
 	int quality;
 	bool listen;

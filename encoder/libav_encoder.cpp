@@ -15,6 +15,8 @@
 #include <linux/videodev2.h>
 
 #include <chrono>
+#include <cmath>
+#include <algorithm>
 #include <iostream>
 
 #include "libav_encoder.hpp"
@@ -352,9 +354,10 @@ void LibAvEncoder::initAudioOutCodec(VideoOptions const *options, StreamInfo con
 }
 
 LibAvEncoder::LibAvEncoder(VideoOptions const *options, StreamInfo const &info)
-	: Encoder(options), output_ready_(false), abort_video_(false), abort_audio_(false), video_start_ts_(0),
-	  audio_samples_(0), in_fmt_ctx_(nullptr), out_fmt_ctx_(nullptr), output_file_(options->output),
-	  output_initialised_(false)
+        : Encoder(options), output_ready_(false), abort_video_(false), abort_audio_(false), video_start_ts_(0),
+          audio_samples_(0), in_fmt_ctx_(nullptr), out_fmt_ctx_(nullptr), output_file_(options->output),
+          output_initialised_(false),
+          audio_gain_linear_(std::pow(10.0, options->audio_gain_db / 20.0)), audio_auto_gain_(options->audio_auto_gain)
 {
 	if (options->circular || options->segment || !options->save_pts.empty() || options->split ||
 		options->initial == "pause")
@@ -575,7 +578,7 @@ extern "C" void LibAvEncoder::releaseBuffer(void *opaque, uint8_t *data)
 
 void LibAvEncoder::videoThread()
 {
-	AVPacket *pkt = av_packet_alloc();
+        AVPacket *pkt = av_packet_alloc();
 	AVFrame *frame = nullptr;
 
 	while (true)
@@ -615,7 +618,94 @@ done:
 	encode(pkt, Video);
 
 	av_packet_free(&pkt);
-	deinitOutput();
+        deinitOutput();
+}
+
+void LibAvEncoder::updateAutoGain(double rms_level)
+{
+        if (!audio_auto_gain_ || rms_level <= 0.0)
+                return;
+
+        constexpr double target = 0.2; // Aim for roughly -14 dBFS RMS
+        constexpr double smoothing = 0.05;
+        constexpr double min_gain = 0.1;
+        constexpr double max_gain = 10.0;
+
+        double adjust = target / rms_level;
+        audio_agc_gain_ = std::clamp(audio_agc_gain_ * (1.0 + smoothing * (adjust - 1.0)), min_gain, max_gain);
+}
+
+void LibAvEncoder::applyAudioGain(uint8_t **samples, int num_samples, int channels, AVSampleFormat fmt)
+{
+        if (!audio_auto_gain_ && std::abs(audio_gain_linear_ - 1.0) < 1e-6)
+                return;
+
+        const bool planar = av_sample_fmt_is_planar(fmt);
+        const int planes = planar ? channels : 1;
+        const int plane_samples = planar ? num_samples : num_samples * channels;
+        double rms_accum = 0.0;
+        int sample_count = 0;
+        const double total_gain = audio_gain_linear_ * audio_agc_gain_;
+
+        for (int p = 0; p < planes; ++p)
+        {
+                switch (fmt)
+                {
+                case AV_SAMPLE_FMT_FLT:
+                case AV_SAMPLE_FMT_FLTP:
+                {
+                        float *data = reinterpret_cast<float *>(samples[p]);
+                        for (int i = 0; i < plane_samples; ++i)
+                        {
+                                float v = data[i];
+                                rms_accum += static_cast<double>(v) * v;
+                                sample_count++;
+                                v = static_cast<float>(std::clamp(static_cast<double>(v) * total_gain, -1.0, 1.0));
+                                data[i] = v;
+                        }
+                        break;
+                }
+                case AV_SAMPLE_FMT_S16:
+                case AV_SAMPLE_FMT_S16P:
+                {
+                        int16_t *data = reinterpret_cast<int16_t *>(samples[p]);
+                        constexpr double norm = 32768.0;
+                        for (int i = 0; i < plane_samples; ++i)
+                        {
+                                double v = static_cast<double>(data[i]) / norm;
+                                rms_accum += v * v;
+                                sample_count++;
+                                int sample = static_cast<int>(std::clamp(v * total_gain, -1.0, 1.0) * norm);
+                                data[i] = static_cast<int16_t>(sample);
+                        }
+                        break;
+                }
+                case AV_SAMPLE_FMT_S32:
+                case AV_SAMPLE_FMT_S32P:
+                {
+                        int32_t *data = reinterpret_cast<int32_t *>(samples[p]);
+                        constexpr double norm = 2147483648.0;
+                        for (int i = 0; i < plane_samples; ++i)
+                        {
+                                double v = static_cast<double>(data[i]) / norm;
+                                rms_accum += v * v;
+                                sample_count++;
+                                int64_t sample = static_cast<int64_t>(std::clamp(v * total_gain, -1.0, 1.0) * norm);
+                                data[i] = static_cast<int32_t>(sample);
+                        }
+                        break;
+                }
+                default:
+                        // Unknown format, bail early
+                        return;
+                }
+        }
+
+        if (sample_count > 0)
+        {
+                double rms = std::sqrt(rms_accum / sample_count);
+                updateAutoGain(rms);
+        }
 }
 
 void LibAvEncoder::audioThread()
@@ -704,9 +794,12 @@ void LibAvEncoder::audioThread()
 		if (ret < 0)
 			throw std::runtime_error("libav: swr_convert failed");
 
-		// Pre-record some audio before the encoded video frame is available.
-		if (!output_ready_)
-		{
+                // Apply gain/AGC before buffering.
+                applyAudioGain(samples, num_output_samples, out_channels, required_fmt);
+
+                // Pre-record some audio before the encoded video frame is available.
+                if (!output_ready_)
+                {
 			using namespace std::chrono_literals;
 			// Pre-record number of samples needed.
 			const unsigned int ns = pre_record_time * stream_[AudioOut]->codecpar->sample_rate / 1s;
