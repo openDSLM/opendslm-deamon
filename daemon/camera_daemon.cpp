@@ -16,9 +16,11 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <string_view>
 #include <cmath>
 #include <cctype>
 #include <cstdlib>
+#include <set>
 #include <sys/utsname.h>
 
 #include <jpeglib.h>
@@ -38,14 +40,13 @@
 #include "encoder/null_encoder.hpp"
 #include "metadata_config.hpp"
 #include "output/dng_output.hpp"
+#include "output/output.hpp"
 #include "preview/preview.hpp"
 
 namespace controls = libcamera::controls;
 namespace properties = libcamera::properties;
 
 namespace rpicam
-{
-namespace
 {
 
 class LibcameraCineDng : public RPiCamEncoder
@@ -197,6 +198,315 @@ std::string readCpuinfoField(const std::string &field)
         return {};
 }
 
+Mp4RecordingStatus Mp4RecordingController::status() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        Mp4RecordingStatus current;
+        current.active = active_;
+        current.filename = filename_;
+        current.last_error = last_error_;
+        current.width = last_config_.width;
+        current.height = last_config_.height;
+        current.fps = last_config_.fps;
+        current.bitrate = last_config_.bitrate;
+        current.intra = last_config_.intra;
+        current.codec = last_config_.codec;
+        current.profile = last_config_.profile;
+        current.level = last_config_.level;
+        current.inline_headers = last_config_.inline_headers;
+        current.frames = last_config_.frames;
+        current.save_pts = last_config_.save_pts;
+        current.segment_ms = last_config_.segment_ms;
+        current.split = last_config_.split;
+        if (active_ && start_time_)
+        {
+                auto elapsed = std::chrono::steady_clock::now() - *start_time_;
+                current.elapsed_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+        }
+        current.audio_enabled = last_config_.audio_enabled;
+        current.audio_codec = last_config_.audio_codec;
+        current.audio_source = last_config_.audio_source;
+        current.audio_device = last_config_.audio_device;
+        current.audio_channels = last_config_.audio_channels;
+        current.audio_bitrate = last_config_.audio_bitrate;
+        current.audio_samplerate = last_config_.audio_samplerate;
+        current.audio_sync_us = last_config_.audio_sync_us;
+        current.audio_auto_gain = last_config_.audio_auto_gain;
+        current.audio_gain_db = last_config_.audio_gain_db;
+        return current;
+}
+
+bool Mp4RecordingController::start(Mp4RecordingConfig const &config, CameraSettings const &settings,
+                                   std::string const &preview_pipeline, std::string &error)
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_)
+        {
+                error = "MP4 recording already active";
+                return false;
+        }
+
+        if (config.filename.empty())
+        {
+                error = "Missing filename";
+                return false;
+        }
+
+        Mp4RecordingConfig effective = config;
+        if (effective.audio_enabled)
+        {
+                if (!effective.audio_codec)
+                        effective.audio_codec = "aac";
+                if (!effective.audio_source)
+                        effective.audio_source = "pulse";
+                if (!effective.audio_device)
+                        effective.audio_device = "default";
+                if (!effective.audio_bitrate)
+                        effective.audio_bitrate = 32000;
+                if (!effective.audio_gain_db)
+                        effective.audio_gain_db = 0.0;
+        }
+        else
+        {
+                effective.audio_codec.reset();
+                effective.audio_source.reset();
+                effective.audio_device.reset();
+                effective.audio_channels.reset();
+                effective.audio_bitrate.reset();
+                effective.audio_samplerate.reset();
+                effective.audio_sync_us.reset();
+                effective.audio_gain_db.reset();
+                effective.audio_auto_gain = false;
+        }
+
+        stop_flag_.store(false);
+        filename_ = effective.filename;
+        last_config_ = effective;
+        last_error_.clear();
+        start_time_ = std::chrono::steady_clock::now();
+
+        std::promise<bool> started;
+        std::future<bool> started_future = started.get_future();
+        thread_ = std::thread(&Mp4RecordingController::recordingThread, this, effective, settings, preview_pipeline,
+                              std::move(started));
+
+        bool ok = started_future.get();
+        if (!ok)
+        {
+                if (thread_.joinable())
+                        thread_.join();
+                error = last_error_;
+                start_time_.reset();
+                return false;
+        }
+
+        active_ = true;
+        return true;
+}
+
+bool Mp4RecordingController::stop(std::string &error)
+{
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!active_ && !thread_.joinable())
+        {
+                error = "No MP4 recording active";
+                return false;
+        }
+
+        stop_flag_.store(true);
+        std::shared_ptr<RPiCamEncoder> app = app_;
+        lock.unlock();
+        if (app)
+        {
+                RPiCamApp::MsgType quit = RPiCamApp::MsgType::Quit;
+                RPiCamApp::MsgPayload payload;
+                app->PostMessage(quit, payload);
+                app->StopCamera();
+        }
+
+        if (thread_.joinable())
+                thread_.join();
+
+        lock.lock();
+        active_ = false;
+        start_time_.reset();
+        app_.reset();
+        return true;
+}
+
+void Mp4RecordingController::recordingThread(Mp4RecordingConfig config, CameraSettings settings,
+                                             std::string preview_pipeline, std::promise<bool> started)
+{
+        bool started_set = false;
+        try
+        {
+                std::shared_ptr<RPiCamEncoder> app = std::make_shared<RPiCamEncoder>();
+                {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        app_ = app;
+                }
+                VideoOptions *options = app->GetOptions();
+                char arg0[] = "opendslm-daemon";
+                char *argv[] = { arg0 };
+                int argc = 1;
+                options->Parse(argc, argv);
+
+                options->codec = "libav";
+                options->libav_format = "mp4";
+                options->libav_video_codec = "h264_v4l2m2m";
+                std::string output_lower = config.filename;
+                std::transform(output_lower.begin(), output_lower.end(), output_lower.begin(), [](unsigned char c) {
+                        return static_cast<char>(std::tolower(c));
+                });
+                auto hasSuffix = [&output_lower](std::string_view suffix) {
+                        return output_lower.size() >= suffix.size()
+                                && output_lower.rfind(suffix.data(), output_lower.size() - suffix.size())
+                                           == output_lower.size() - suffix.size();
+                };
+                auto normaliseCodec = [](std::string codec) {
+                        std::transform(codec.begin(), codec.end(), codec.begin(), [](unsigned char c) {
+                                return static_cast<char>(std::tolower(c));
+                        });
+                        return codec;
+                };
+                std::string selected_codec = config.codec.value_or("");
+                if (!selected_codec.empty())
+                {
+                        selected_codec = normaliseCodec(selected_codec);
+                        if (selected_codec == "h265" || selected_codec == "hevc")
+                                selected_codec = "hevc_v4l2m2m";
+                        else if (selected_codec == "h264")
+                                selected_codec = "h264_v4l2m2m";
+                }
+                if (selected_codec.empty())
+                {
+                        if (hasSuffix(".hevc") || hasSuffix(".h265"))
+                                selected_codec = "hevc_v4l2m2m";
+                        else
+                                selected_codec = options->libav_video_codec;
+                }
+                options->libav_video_codec = selected_codec;
+                last_config_.codec = selected_codec;
+
+                options->nopreview = false;
+                options->preview = "0,0,0,0";
+                options->preview_gstreamer = preview_pipeline;
+                options->viewfinder_buffer_count = 2;
+                options->buffer_count = 6;
+                options->viewfinder_width = 640;
+                options->viewfinder_height = 360;
+                options->lores_width = options->viewfinder_width;
+                options->lores_height = options->viewfinder_height;
+                options->no_raw = true;
+                options->output = config.filename;
+                options->framerate = config.fps.value_or(settings.fps);
+                options->width = config.width.value_or(0);
+                options->height = config.height.value_or(0);
+                if (config.bitrate)
+                        options->bitrate.set(std::to_string(*config.bitrate) + "bps");
+                if (config.intra)
+                        options->intra = *config.intra;
+                if (config.profile)
+                        options->profile = *config.profile;
+                if (config.level)
+                        options->level = *config.level;
+                options->inline_headers = config.inline_headers;
+                if (config.frames)
+                        options->frames = *config.frames;
+                else
+                        options->frames = 0;
+                options->save_pts = config.save_pts.value_or("");
+                options->segment = config.segment_ms.value_or(0);
+                options->split = config.split;
+                options->libav_audio = config.audio_enabled;
+                if (options->libav_audio)
+                {
+                        if (config.audio_codec)
+                                options->audio_codec = *config.audio_codec;
+                        if (config.audio_source)
+                                options->audio_source = *config.audio_source;
+                        if (config.audio_device)
+                                options->audio_device = *config.audio_device;
+                        if (config.audio_channels)
+                                options->audio_channels = *config.audio_channels;
+                        if (config.audio_bitrate)
+                                options->audio_bitrate.set(std::to_string(*config.audio_bitrate) + "bps");
+                        if (config.audio_samplerate)
+                                options->audio_samplerate = *config.audio_samplerate;
+                        if (config.audio_sync_us)
+                                options->av_sync.value = std::chrono::microseconds(*config.audio_sync_us);
+                        options->audio_auto_gain = config.audio_auto_gain;
+                        if (config.audio_gain_db)
+                                options->audio_gain_db = *config.audio_gain_db;
+                }
+
+                app->OpenCamera();
+                app->ConfigureVideo();
+
+                StreamInfo vinfo;
+                libcamera::Stream *vstream = app->VideoStream(&vinfo);
+                if (!vstream)
+                        throw std::runtime_error("Video stream unavailable for MP4 recording");
+
+                std::unique_ptr<Output> output(Output::Create(options));
+                if (!output)
+                        throw std::runtime_error("Failed to create MP4 output sink");
+
+                app->SetEncodeOutputReadyCallback(
+                        [&output](void *mem, size_t size, int64_t ts, bool key) { output->OutputReady(mem, size, ts, key); });
+                app->SetMetadataReadyCallback(
+                        [&output](libcamera::ControlList &ctrls) { output->MetadataReady(ctrls); });
+
+                app->StartEncoder();
+                app->StartCamera();
+
+                started.set_value(true);
+                started_set = true;
+
+                while (!stop_flag_.load())
+                {
+                        RPiCamEncoder::Msg msg = app->Wait();
+                        if (msg.type == RPiCamApp::MsgType::Timeout)
+                                continue;
+                        if (msg.type == RPiCamEncoder::MsgType::Quit)
+                                break;
+                        if (msg.type != RPiCamEncoder::MsgType::RequestComplete)
+                                throw std::runtime_error("Unrecognised message from camera");
+
+                        CompletedRequestPtr &completed_request = std::get<CompletedRequestPtr>(msg.payload);
+                        app->EncodeBuffer(completed_request, vstream);
+                }
+
+                app->StopCamera();
+                app->StopEncoder();
+                output.reset();
+        }
+        catch (std::exception const &ex)
+        {
+                if (!started_set)
+                        started.set_value(false);
+                started_set = true;
+                {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        last_error_ = ex.what();
+                        active_ = false;
+                        app_.reset();
+                        start_time_.reset();
+                }
+                return;
+        }
+
+        if (!started_set)
+                started.set_value(true);
+
+        {
+                std::lock_guard<std::mutex> lock(mutex_);
+                active_ = false;
+                app_.reset();
+                start_time_.reset();
+        }
+}
+
 std::string detectBoardModel()
 {
         std::string model = readFirstLine("/proc/device-tree/model");
@@ -286,6 +596,27 @@ std::string formatDouble(double value)
 }
 
 } // namespace
+
+double CameraDaemon::capFrameRate(double requested) const
+{
+        if (requested <= 0.0)
+                return requested;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        double max_fps = 0.0;
+        for (auto const &camera : hardware_info_.cameras)
+        {
+                if (!last_camera_model_.empty() && camera.model != last_camera_model_ && camera.id != last_camera_model_)
+                        continue;
+                for (auto const &mode : camera.modes)
+                        max_fps = std::max(max_fps, mode.max_fps);
+        }
+
+        if (max_fps > 0.0 && requested > max_fps)
+                return max_fps;
+
+        return requested;
+}
 
 CameraDaemon::CameraDaemon()
 {
@@ -457,6 +788,125 @@ bool CameraDaemon::updateSettings(JsonObject const &values, std::string &error_m
                 updated.mode = *mode;
         }
 
+        if (auto it = values.find("contrast"); it != values.end())
+        {
+                auto number = it->second.asNumber();
+                if (!number || *number < 0.0)
+                {
+                        error_message = "Invalid contrast value";
+                        return false;
+                }
+                updated.contrast = static_cast<float>(*number);
+        }
+
+        if (auto it = values.find("saturation"); it != values.end())
+        {
+                auto number = it->second.asNumber();
+                if (!number || *number < 0.0)
+                {
+                        error_message = "Invalid saturation value";
+                        return false;
+                }
+                updated.saturation = static_cast<float>(*number);
+        }
+
+        if (auto it = values.find("sharpness"); it != values.end())
+        {
+                auto number = it->second.asNumber();
+                if (!number || *number < 0.0)
+                {
+                        error_message = "Invalid sharpness value";
+                        return false;
+                }
+                updated.sharpness = static_cast<float>(*number);
+        }
+
+        if (auto it = values.find("brightness"); it != values.end())
+        {
+                auto number = it->second.asNumber();
+                if (!number || *number < -1.0 || *number > 1.0)
+                {
+                        error_message = "Invalid brightness value";
+                        return false;
+                }
+                updated.brightness = static_cast<float>(*number);
+        }
+
+        if (auto it = values.find("denoise"); it != values.end())
+        {
+                auto mode = it->second.asString();
+                if (!mode)
+                {
+                        error_message = "denoise must be a string";
+                        return false;
+                }
+                std::string lowered = *mode;
+                std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+                        return static_cast<char>(std::tolower(c));
+                });
+                if (lowered != "auto" && lowered != "off" && lowered != "cdn_off" && lowered != "cdn_fast" && lowered != "cdn_hq")
+                {
+                        error_message = "Unsupported denoise mode";
+                        return false;
+                }
+                updated.denoise = lowered;
+        }
+
+        if (auto it = values.find("awb"); it != values.end())
+        {
+                auto mode = it->second.asString();
+                if (!mode)
+                {
+                        error_message = "awb must be a string";
+                        return false;
+                }
+                std::string lowered = *mode;
+                std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+                        return static_cast<char>(std::tolower(c));
+                });
+                static const std::set<std::string> kAwbModes = { "auto", "normal", "incandescent", "tungsten", "fluorescent",
+                                                                  "indoor", "daylight", "cloudy", "custom" };
+                if (!kAwbModes.count(lowered))
+                {
+                        error_message = "Unsupported AWB mode";
+                        return false;
+                }
+                updated.awb_mode = lowered;
+        }
+
+        if (auto it = values.find("awb_gain_r"); it != values.end())
+        {
+                auto number = it->second.asNumber();
+                if (!number || *number < 0.0)
+                {
+                        error_message = "Invalid awb_gain_r value";
+                        return false;
+                }
+                updated.awb_gain_r = *number;
+        }
+
+        if (auto it = values.find("awb_gain_b"); it != values.end())
+        {
+                auto number = it->second.asNumber();
+                if (!number || *number < 0.0)
+                {
+                        error_message = "Invalid awb_gain_b value";
+                        return false;
+                }
+                updated.awb_gain_b = *number;
+        }
+
+        if (auto it = values.find("tuning_file"); it != values.end())
+        {
+                auto file = it->second.asString();
+                if (!file)
+                {
+                        error_message = "tuning_file must be a string";
+                        return false;
+                }
+                updated.tuning_file = *file;
+        }
+
         settings_ = updated;
         session_.last_error.clear();
         return true;
@@ -603,12 +1053,84 @@ bool CameraDaemon::stopSession(std::string &error_message)
 std::string CameraDaemon::buildStatusJson() const
 {
         std::lock_guard<std::mutex> lock(mutex_);
+        Mp4RecordingStatus mp4_status = mp4_controller_.status();
         std::ostringstream json;
+        auto writeOptionalNumber = [&json](const char *name, auto const &value) {
+                json << "\"" << name << "\":";
+                if (value)
+                        json << *value;
+                else
+                        json << "null";
+        };
+        auto writeOptionalString = [&json](const char *name, auto const &value) {
+                json << "\"" << name << "\":";
+                if (value)
+                        json << jsonString(*value);
+                else
+                        json << "null";
+        };
         json << "{\"state\":{"
              << "\"active\":" << (session_.active ? "true" : "false")
              << ",\"mode\":" << jsonString(modeToString(session_.mode))
              << ",\"last_error\":" << jsonString(session_.last_error)
-             << "},\"settings\":" << buildSettingsJson(settings_, last_camera_model_)
+             << "},\"recording\":{"
+             << "\"active\":" << (mp4_status.active ? "true" : "false")
+             << ",\"filename\":" << jsonString(mp4_status.filename)
+             << ",\"last_error\":" << jsonString(mp4_status.last_error)
+             << ",\"elapsed_ms\":";
+        if (mp4_status.elapsed_ms)
+                json << *mp4_status.elapsed_ms;
+        else
+                json << "null";
+        json << ",\"config\":";
+        json << "{";
+        writeOptionalNumber("width", mp4_status.width);
+        json << ',';
+        writeOptionalNumber("height", mp4_status.height);
+        json << ',';
+        writeOptionalNumber("fps", mp4_status.fps);
+        json << ',';
+        writeOptionalNumber("bitrate", mp4_status.bitrate);
+        json << ',';
+        writeOptionalNumber("intra", mp4_status.intra);
+        json << ',';
+        writeOptionalString("codec", mp4_status.codec);
+        json << ',';
+        writeOptionalString("profile", mp4_status.profile);
+        json << ',';
+        writeOptionalString("level", mp4_status.level);
+        json << ",\"inline\":" << (mp4_status.inline_headers ? "true" : "false") << ',';
+        writeOptionalNumber("frames", mp4_status.frames);
+        json << ',';
+        writeOptionalString("save_pts", mp4_status.save_pts);
+        json << ',';
+        writeOptionalNumber("segment", mp4_status.segment_ms);
+        json << ",\"split\":" << (mp4_status.split ? "true" : "false");
+        json << "},\"audio\":";
+        json << "{";
+        json << "\"enabled\":" << (mp4_status.audio_enabled ? "true" : "false") << ',';
+        writeOptionalString("codec", mp4_status.audio_codec);
+        json << ',';
+        writeOptionalString("source", mp4_status.audio_source);
+        json << ',';
+        writeOptionalString("device", mp4_status.audio_device);
+        json << ',';
+        writeOptionalNumber("channels", mp4_status.audio_channels);
+        json << ',';
+        writeOptionalNumber("bitrate", mp4_status.audio_bitrate);
+        json << ',';
+        writeOptionalNumber("samplerate", mp4_status.audio_samplerate);
+        json << ',';
+        json << "\"auto_gain\":" << (mp4_status.audio_auto_gain ? "true" : "false") << ',';
+        writeOptionalNumber("gain_db", mp4_status.audio_gain_db);
+        json << ',';
+        json << "\"sync_us\":";
+        if (mp4_status.audio_sync_us)
+                json << *mp4_status.audio_sync_us;
+        else
+                json << "null";
+        json << "}";
+        json << "},\"settings\":" << buildSettingsJson(settings_, last_camera_model_)
              << ",\"preview_pipeline\":" << jsonString(preview_pipeline_)
              << ",\"preview_client_pipeline\":" << jsonString(preview_client_pipeline_)
              << ",\"last_capture\":";
@@ -620,7 +1142,6 @@ std::string CameraDaemon::buildStatusJson() const
         json << "}";
         return json.str();
 }
-
 std::string CameraDaemon::buildSettingsJson(CameraSettings const &settings,
                                             std::string const &camera_model) const
 {
@@ -632,6 +1153,15 @@ std::string CameraDaemon::buildSettingsJson(CameraSettings const &settings,
              << ",\"auto_exposure\":" << (settings.auto_exposure ? "true" : "false")
              << ",\"output_dir\":" << jsonString(settings.output_dir)
              << ",\"mode\":" << jsonString(settings.mode)
+             << ",\"contrast\":" << settings.contrast
+             << ",\"saturation\":" << settings.saturation
+             << ",\"sharpness\":" << settings.sharpness
+             << ",\"brightness\":" << settings.brightness
+             << ",\"denoise\":" << jsonString(settings.denoise)
+             << ",\"awb\":" << jsonString(settings.awb_mode)
+             << ",\"awb_gain_r\":" << settings.awb_gain_r
+             << ",\"awb_gain_b\":" << settings.awb_gain_b
+             << ",\"tuning_file\":" << jsonString(settings.tuning_file)
              << ",\"metadata\":" << buildMetadataJson(settings, camera_model)
              << "}";
         return json.str();
@@ -1315,6 +1845,12 @@ void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoO
         options.output = request_raw ? settings.output_dir : std::string();
         options.framerate = settings.fps;
 
+        if (!options.preview_gstreamer.empty())
+        {
+                options.lores_width = options.viewfinder_width;
+                options.lores_height = options.viewfinder_height;
+        }
+
         if (!settings.mode.empty())
         {
                 options.mode_string = settings.mode;
@@ -1340,6 +1876,19 @@ void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoO
                         std::chrono::microseconds(static_cast<int64_t>(settings.shutter_us)));
                 options.gain = settings.analogue_gain;
         }
+
+        options.contrast = settings.contrast;
+        options.saturation = settings.saturation;
+        options.sharpness = settings.sharpness;
+        options.brightness = settings.brightness;
+        options.denoise = settings.denoise;
+        options.awb = settings.awb_mode;
+        {
+                std::ostringstream awb_gains;
+                awb_gains << settings.awb_gain_r << ',' << settings.awb_gain_b;
+                options.awbgains = awb_gains.str();
+        }
+        options.tuning_file = settings.tuning_file;
 }
 
 void CameraDaemon::registerRoutes()
@@ -1614,6 +2163,271 @@ void CameraDaemon::registerRoutes()
                 return response;
         });
 
+        server_.addHandler("POST", "/recordings/mp4/start", [this](HttpRequest const &request) {
+                HttpResponse response;
+                JsonObject values = parseJsonObject(request.body);
+                auto filename_it = values.find("filename");
+                if (filename_it == values.end())
+                {
+                        response.status_code = 400;
+                        response.body = "{\"error\":\"Missing field: filename\"}";
+                        return response;
+                }
+
+                auto filename = filename_it->second.asString();
+                if (!filename || filename->empty())
+                {
+                        response.status_code = 400;
+                        response.body = "{\"error\":\"filename must be a non-empty string\"}";
+                        return response;
+                }
+
+                auto parsePositiveInt = [&](const char *name, std::optional<unsigned int> &target, bool allow_zero = false) -> bool {
+                        auto it = values.find(name);
+                        if (it == values.end())
+                                return true;
+                        auto number = it->second.asNumber();
+                        if (!number || *number < 0 || std::floor(*number) != *number || (!allow_zero && *number == 0))
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":" + jsonString(std::string(name) + " must be a positive integer") + "}";
+                                return false;
+                        }
+                        target = static_cast<unsigned int>(*number);
+                        return true;
+                };
+                auto parseSignedInt = [&](const char *name, std::optional<int> &target) -> bool {
+                        auto it = values.find(name);
+                        if (it == values.end())
+                                return true;
+                        auto number = it->second.asNumber();
+                        if (!number || std::floor(*number) != *number)
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":" + jsonString(std::string(name) + " must be an integer") + "}";
+                                return false;
+                        }
+                        target = static_cast<int>(*number);
+                        return true;
+                };
+                auto parseStringField = [&](const char *name, std::optional<std::string> &target, bool allow_empty = false) -> bool {
+                        auto it = values.find(name);
+                        if (it == values.end())
+                                return true;
+                        auto str = it->second.asString();
+                        if (!str || (!allow_empty && str->empty()))
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":" + jsonString(std::string(name) + " must be a string") + "}";
+                                return false;
+                        }
+                        target = *str;
+                        return true;
+                };
+                auto parseBoolField = [&](const char *name, bool &target) -> bool {
+                        auto it = values.find(name);
+                        if (it == values.end())
+                                return true;
+                        auto flag = it->second.asBool();
+                        if (!flag)
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":" + jsonString(std::string(name) + " must be true or false") + "}";
+                                return false;
+                        }
+                        target = *flag;
+                        return true;
+                };
+                auto parseDoubleField = [&](const char *name, std::optional<double> &target) -> bool {
+                        auto it = values.find(name);
+                        if (it == values.end())
+                                return true;
+                        auto number = it->second.asNumber();
+                        if (!number)
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":" + jsonString(std::string(name) + " must be a number") + "}"; 
+                                return false;
+                        }
+                        target = *number;
+                        return true;
+                };
+
+                Mp4RecordingConfig config;
+                config.filename = *filename;
+                config.audio_enabled = true;
+                config.audio_codec = "aac";
+                config.audio_source = "pulse";
+                config.audio_device = "default";
+                config.audio_bitrate = 32000;
+                if (!parseStringField("codec", config.codec, true))
+                        return response;
+                if (config.codec && config.codec->empty())
+                        config.codec.reset();
+                if (!parsePositiveInt("width", config.width))
+                        return response;
+                if (!parsePositiveInt("height", config.height))
+                        return response;
+                if (!parsePositiveInt("bitrate", config.bitrate))
+                        return response;
+                if (!parsePositiveInt("intra", config.intra))
+                        return response;
+                if (!parseStringField("profile", config.profile))
+                        return response;
+                if (!parseStringField("level", config.level))
+                        return response;
+                if (!parseBoolField("inline", config.inline_headers))
+                        return response;
+                if (!parsePositiveInt("frames", config.frames))
+                        return response;
+                if (!parseStringField("save_pts", config.save_pts))
+                        return response;
+                if (!parsePositiveInt("segment", config.segment_ms, true))
+                        return response;
+                if (!parseBoolField("split", config.split))
+                        return response;
+                if (!parseBoolField("libav_audio", config.audio_enabled))
+                        return response;
+                if (!parseBoolField("audio", config.audio_enabled))
+                        return response;
+                if (!parseStringField("audio_codec", config.audio_codec))
+                        return response;
+                if (!parseStringField("audio_device", config.audio_device))
+                        return response;
+                if (!parsePositiveInt("audio_bitrate", config.audio_bitrate))
+                        return response;
+                if (!parsePositiveInt("audio_samplerate", config.audio_samplerate))
+                        return response;
+                if (!parsePositiveInt("audio_channels", config.audio_channels))
+                        return response;
+                if (!parseSignedInt("audio_sync_us", config.audio_sync_us))
+                        return response;
+                if (!parseSignedInt("av_sync", config.audio_sync_us))
+                        return response;
+                if (!parseBoolField("audio_auto_gain", config.audio_auto_gain))
+                        return response;
+                if (!parseDoubleField("audio_gain_db", config.audio_gain_db))
+                        return response;
+                if (config.codec)
+                {
+                        std::string codec = *config.codec;
+                        std::transform(codec.begin(), codec.end(), codec.begin(), [](unsigned char c) {
+                                return static_cast<char>(std::tolower(c));
+                        });
+                        if (codec == "libav")
+                                config.codec.reset();
+                        else if (codec == "h265")
+                                codec = "hevc";
+                        else if (codec == "h265_v4l2m2m")
+                                codec = "hevc_v4l2m2m";
+                        else if (codec == "h264_v4l2m2m" || codec == "hevc_v4l2m2m" || codec == "libx264" || codec == "libx265")
+                                codec = codec;
+                        else if (codec == "h264" || codec == "hevc")
+                                codec += "_v4l2m2m";
+                        else
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":\"Unsupported codec requested\"}";
+                                return response;
+                        }
+                        config.codec = codec;
+                }
+                if (auto it = values.find("audio_source"); it != values.end())
+                {
+                        auto str = it->second.asString();
+                        if (!str || str->empty())
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":\"audio_source must be a string\"}";
+                                return response;
+                        }
+                        if (*str != "pulse" && *str != "alsa")
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":\"audio_source must be pulse or alsa\"}";
+                                return response;
+                        }
+                        config.audio_source = *str;
+                }
+                if (!config.audio_enabled)
+                {
+                        config.audio_codec.reset();
+                        config.audio_source.reset();
+                        config.audio_device.reset();
+                        config.audio_channels.reset();
+                        config.audio_bitrate.reset();
+                        config.audio_samplerate.reset();
+                        config.audio_sync_us.reset();
+                }
+
+                if (auto it = values.find("fps"); it != values.end())
+                {
+                        auto number = it->second.asNumber();
+                        if (!number || *number <= 0)
+                        {
+                                response.status_code = 400;
+                                response.body = "{\"error\":\"fps must be a positive number\"}";
+                                return response;
+                        }
+                        config.fps = *number;
+                }
+
+                {
+                        std::lock_guard<std::mutex> lock(capture_mutex_);
+                        if (video_recording_)
+                        {
+                                response.status_code = 409;
+                                response.body = "{\"error\":\"RAW recording in progress\",\"filename\":" + jsonString(*filename) + "}";
+                                return response;
+                        }
+                }
+
+                if (mp4_controller_.status().active)
+                {
+                        response.status_code = 409;
+                        response.body = "{\"error\":\"MP4 recording already active\",\"filename\":" + jsonString(*filename) + "}";
+                        return response;
+                }
+
+                stopCameraLoop();
+
+                std::string error;
+                CameraSettings settings = getSettings();
+                if (!config.fps)
+                        config.fps = settings.fps;
+                config.fps = capFrameRate(*config.fps);
+                if (!mp4_controller_.start(config, settings, previewPipeline(), error))
+                {
+                        startCameraLoop();
+                        if (error == "MP4 recording already active")
+                                response.status_code = 409;
+                        else
+                                response.status_code = 400;
+                        response.body = "{\"error\":" + jsonString(error.empty() ? std::string("Failed to start MP4 recording") : error)
+                                      + ",\"filename\":" + jsonString(*filename) + "}";
+                        return response;
+                }
+
+                response.body = buildStatusJson();
+                return response;
+        });
+
+        server_.addHandler("POST", "/recordings/mp4/stop", [this](HttpRequest const &) {
+                HttpResponse response;
+                std::string error;
+                std::string filename = mp4_controller_.status().filename;
+                if (!mp4_controller_.stop(error))
+                {
+                        response.status_code = 409;
+                        response.body = "{\"error\":" + jsonString(error) + ",\"filename\":" + jsonString(filename) + "}";
+                        return response;
+                }
+
+                startCameraLoop();
+                response.body = buildStatusJson();
+                return response;
+        });
+
         server_.addHandler("DELETE", "/recordings/video", [this](HttpRequest const &) {
                 HttpResponse response;
                 std::string error;
@@ -1702,6 +2516,7 @@ void CameraDaemon::cameraLoop()
 
                         CameraSettings settings = getSettings();
                         applySettingsToOptions(settings, *options, true /* request raw */);
+                        options->framerate = capFrameRate(options->framerate);
 
                 std::string dng_output = settings.output_dir;
                 {
@@ -1830,7 +2645,7 @@ void CameraDaemon::cameraLoop()
                                                 caps << kCapsToken;
                                                 if (vinfo.width && vinfo.height)
                                                         caps << ",width=" << vinfo.width << ",height=" << vinfo.height;
-                                                double fps_value = settings.fps;
+                                                double fps_value = options->framerate;
                                                 if (fps_value > 0.0)
                                                 {
                                                         long fps_scaled = std::lround(fps_value * 1000.0);

@@ -93,6 +93,17 @@ payload now also contains a `hardware` block that mirrors `GET /hardware`
 described below, so most clients only need a single request to populate camera
 settings and available resolutions.
 
+`recording` contains the MP4 controller status with the last requested
+parameters. The `config` sub-object surfaces the requested `width`, `height`,
+`fps`, `bitrate`, GOP (`intra`, set `1` for All-Intra), `codec`, `profile`,
+`level`, `inline` (write SPS/PPS on every I‑frame), `frames`, and rolling
+options (`save_pts`, `segment`, `split`). The `audio` sub-object reports whether
+audio is enabled along with the chosen `codec`, `source` (`pulse` or `alsa`),
+`device`, `channels`, `bitrate` (bps), `samplerate` (Hz), `auto_gain`/`gain_db`,
+and `sync_us`/`av_sync` offset applied to the audio track. When recording is
+live, `elapsed_ms` counts how long the encoder has been running and `filename`
+echoes the active clip name.
+
 ### `GET /hardware`
 
 Returns a snapshot of the detected platform and all attached sensors. A typical
@@ -204,6 +215,74 @@ wrong mid-capture you must clean up the partially written DNG files manually.
 ### `DELETE /recordings/video`
 
 Stops the active video recording. Returns HTTP 409 if nothing is running.
+
+### `POST /recordings/mp4/start`
+
+Starts an MP4 recording using the hardware encoder and the preview pipeline
+configured for YUV420. Parameters (all optional except `filename`):
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `filename` | string | Required output path. `.mp4` containers are muxed; `.h265`/`.hevc` switches the encoder to HEVC. |
+| `width` / `height` | int | Override video resolution; defaults to the current camera mode. |
+| `fps` | float | Requested frame rate; capped to the probed sensor limit and mirrored to the preview caps. |
+| `bitrate` | int | Target video bitrate in bits per second. |
+| `codec` | string | `h264`/`h264_v4l2m2m`, `hevc`/`hevc_v4l2m2m`, `libx264`, or `libx265`. |
+| `profile` / `level` | string | Encoder profile and level strings passed through to libav when supported. |
+| `intra` | int | GOP length; set to `1` for All-Intra or leave unset for long-GOP. |
+| `inline` | bool | Emit SPS/PPS on every I-frame (decoder-friendly All-Intra). |
+| `frames` | int | Stop after this many frames (optional cap). |
+| `save_pts` | string | Write presentation timestamps to the given file. |
+| `segment` | int | Milliseconds per segment when rolling recordings. |
+| `split` | bool | Create a new file after each pause/resume cycle. |
+| `libav_audio` / `audio` | bool | Enable/disable audio (default `true`). |
+| `audio_codec` | string | Audio codec passed to libav (default `aac`). |
+| `audio_source` | string | `pulse` or `alsa` (default `pulse`). |
+| `audio_device` | string | Device name for the chosen source (default `default`). |
+| `audio_channels` | int | Number of channels; omit to use the source default. |
+| `audio_bitrate` | int | Audio bitrate in bits per second (default 32000). |
+| `audio_samplerate` | int | Audio sample rate in Hz; omit to follow the source. |
+| `audio_auto_gain` | bool | Enable lightweight AGC on the audio input (default `false`). |
+| `audio_gain_db` | float | Apply a fixed pre-encode gain in decibels (default `0.0`). |
+| `audio_sync_us` / `av_sync` | int | Microsecond offset applied to audio relative to video (positive or negative). |
+
+The daemon rejects requests if a RAW recording is running, if an MP4 capture is
+already active, or if the encoder/muxer cannot be initialised. Error responses
+echo the requested filename to simplify UI messaging.
+
+### `POST /recordings/mp4/stop`
+
+Stops the active MP4 recording and returns the updated `/status` payload.
+Returns HTTP 409 if nothing is running.
+
+### ISP look controls and presets
+
+`POST /settings` now accepts additional ISP tuning fields alongside exposure:
+
+- `contrast`, `saturation`, `sharpness`, `brightness`
+- `denoise` (`auto`, `off`, `cdn_off`, `cdn_fast`, `cdn_hq`)
+- `awb` plus manual `awb_gain_r` / `awb_gain_b` when locking white balance
+- `tuning_file` for users who want to swap libcamera tuning JSON blobs
+
+The shipped `assets/picture_profiles.json` file defines two GTK/UI-friendly
+presets you can load and tweak before starting a recording:
+
+- **Flat / grade-friendly**: lower contrast/saturation/sharpness, light denoise,
+  manual AWB gains, HEVC, high bitrate, All-Intra, `inline=true`.
+- **Standard / straight from cam**: near-default ISP values, AWB auto, H.264,
+  long-GOP, moderate bitrate.
+
+### Audio level overlay notes
+
+Audio is captured via libav and not exposed in the preview stream. If you need
+live meters in your UI, run a sidecar GStreamer probe against the same Pulse
+source and listen for `level` element messages. Example:
+
+```bash
+gst-launch-1.0 -q pulsesrc device=default ! level interval=100000000 ! fakesink silent=true
+```
+
+Parse the bus `level` messages for RMS/peak data and overlay them in the UI.
 
 ### `GET /preview`
 

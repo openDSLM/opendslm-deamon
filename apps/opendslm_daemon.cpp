@@ -46,9 +46,18 @@ std::string gstQuote(const std::string &value)
 std::string buildShmPreviewPipeline(const std::string &socket_path)
 {
         std::string quoted = gstQuote(socket_path);
-        return "queue max-size-buffers=2 leaky=downstream ! videoconvert ! video/x-raw,format=RGBA ! shmsink "
-               "wait-for-connection=false sync=false socket-path="
-               + quoted;
+        const char *extra_queue_env = std::getenv("ODS_PREVIEW_EXTRA_QUEUE");
+        bool add_extra_queue = true;
+        if (extra_queue_env && (std::strcmp(extra_queue_env, "0") == 0 || std::strcmp(extra_queue_env, "false") == 0))
+                add_extra_queue = false;
+
+        std::string pipeline = "queue max-size-buffers=2 leaky=downstream ! videoconvert ! ";
+        if (add_extra_queue)
+                pipeline += "queue max-size-buffers=4 leaky=downstream ! ";
+
+        pipeline += "video/x-raw,format=RGBA ! shmsink wait-for-connection=false sync=false socket-path=";
+        pipeline += quoted;
+        return pipeline;
 }
 
 std::string buildShmClientPipeline(const std::string &socket_path)

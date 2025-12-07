@@ -1,0 +1,44 @@
+{
+  "flat": {
+    "label": "Flat / grade-friendly",
+    "isp": {
+      "contrast": 0.85,
+      "saturation": 0.8,
+      "sharpness": 0.75,
+      "brightness": 0.0,
+      "denoise": "cdn_fast",
+      "awb": "custom",
+      "awb_gain_r": 1.6,
+      "awb_gain_b": 1.6,
+      "tuning_file": "-"
+    },
+    "recording": {
+      "codec": "hevc_v4l2m2m",
+      "bitrate": 80000000,
+      "intra": 1,
+      "inline": true,
+      "audio": true
+    }
+  },
+  "standard": {
+    "label": "Standard / straight from cam",
+    "isp": {
+      "contrast": 1.05,
+      "saturation": 1.0,
+      "sharpness": 1.0,
+      "brightness": 0.0,
+      "denoise": "cdn_hq",
+      "awb": "auto",
+      "awb_gain_r": 0.0,
+      "awb_gain_b": 0.0,
+      "tuning_file": "-"
+    },
+    "recording": {
+      "codec": "h264_v4l2m2m",
+      "bitrate": 35000000,
+      "intra": 120,
+      "inline": false,
+      "audio": true
+    }
+  }
+}

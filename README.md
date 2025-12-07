@@ -36,8 +36,12 @@ remain valid:
 The daemon powers the [openDSLM GTK UI](https://github.com/openDSLM/gtk-ui), and
 current UI builds expect the HTTP API documented here. Start `opendslm-daemon`
 before launching the GTK client so it can attach to `/status`, `/settings`,
-`/preview`, and the GStreamer shared memory endpoints. If you change ports or
-socket paths, export matching overrides for the UI environment variables.
+`/preview`, and the GStreamer shared memory endpoints. GTK record/stop buttons
+should call `/recordings/mp4/start` and `/recordings/mp4/stop`, bubble up any
+errors (RAW conflicts, unsupported codecs, encoder failures), and reflect the
+`/status` fields for filename, elapsed time, codec, bitrate, GOP mode, and
+whether audio is active. If you change ports or socket paths, export matching
+overrides for the UI environment variables.
 
 ## Compatibility (alpha)
 
@@ -117,6 +121,23 @@ Replace `gtk4paintablesink` with any sink suitable for your UI. For example, use
 gst-launch-1.0 shmsrc socket-path=/tmp/opendslm-preview.sock is-live=true do-timestamp=true ! \
   queue max-size-buffers=2 leaky=downstream ! video/x-raw,format=RGBA ! autovideosink
 ```
+
+The daemon's default preview pipeline inserts one or two `queue` elements ahead of the shared-memory sink to absorb jitter from
+MP4 encoding. Set `ODS_PREVIEW_EXTRA_QUEUE=0` if you want to drop the second queue for a tighter latency budget.
+
+## MP4 recording + picture profiles
+
+The HTTP API exposes `/recordings/mp4/start` and `/recordings/mp4/stop` to control
+hardware-accelerated MP4 captures while leaving the preview pipeline running.
+Recording status (filename, elapsed time, codec/bitrate, GOP or All-Intra
+settings, and whether audio is active) is returned via `/status` so the GTK UI can
+keep its widgets in sync and surface any start-up errors (unsupported codec,
+conflicting RAW session, etc.).
+
+The GTK-facing `assets/picture_profiles.json` file ships `flat` and `standard`
+presets that bundle ISP look controls and encoder defaults. The flat preset dials
+back contrast/saturation/sharpness, uses light denoise with manual AWB gains, and
+targets a high-bitrate All-Intra HEVC recording with inline SPS/PPS headers.
 
 ## Preview assist stages
 

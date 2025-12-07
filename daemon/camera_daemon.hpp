@@ -6,7 +6,10 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <future>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -41,6 +44,15 @@ struct CameraSettings
         bool auto_exposure = true;
         std::string output_dir = "/ssd/RAW";
         std::string mode;
+        float contrast = 1.0f;
+        float saturation = 1.0f;
+        float sharpness = 1.0f;
+        float brightness = 0.0f;
+        std::string denoise = "auto";
+        std::string awb_mode = "auto";
+        double awb_gain_r = 0.0;
+        double awb_gain_b = 0.0;
+        std::string tuning_file = "-";
         MetadataSettings metadata;
 };
 
@@ -63,6 +75,88 @@ struct CaptureSummary
         std::string type;
         std::vector<std::string> frames;
         std::string directory;
+};
+
+struct Mp4RecordingStatus
+{
+        bool active = false;
+        std::string filename;
+        std::string last_error;
+        std::optional<unsigned int> width;
+        std::optional<unsigned int> height;
+        std::optional<double> fps;
+        std::optional<unsigned int> bitrate;
+        std::optional<unsigned int> intra;
+        std::optional<std::string> codec;
+        std::optional<std::string> profile;
+        std::optional<std::string> level;
+        bool inline_headers = false;
+        std::optional<unsigned int> frames;
+        std::optional<std::string> save_pts;
+        std::optional<unsigned int> segment_ms;
+        bool split = false;
+        std::optional<uint64_t> elapsed_ms;
+        bool audio_enabled = true;
+        std::optional<std::string> audio_codec;
+        std::optional<std::string> audio_source;
+        std::optional<std::string> audio_device;
+        std::optional<unsigned int> audio_channels;
+        std::optional<unsigned int> audio_bitrate;
+        std::optional<unsigned int> audio_samplerate;
+        std::optional<int> audio_sync_us;
+        bool audio_auto_gain = false;
+        std::optional<double> audio_gain_db;
+};
+
+struct Mp4RecordingConfig
+{
+        std::string filename;
+        std::optional<unsigned int> width;
+        std::optional<unsigned int> height;
+        std::optional<double> fps;
+        std::optional<unsigned int> bitrate;
+        std::optional<unsigned int> intra;
+        std::optional<std::string> codec;
+        std::optional<std::string> profile;
+        std::optional<std::string> level;
+        bool inline_headers = false;
+        std::optional<unsigned int> frames;
+        std::optional<std::string> save_pts;
+        std::optional<unsigned int> segment_ms;
+        bool split = false;
+        bool audio_enabled = true;
+        std::optional<std::string> audio_codec;
+        std::optional<std::string> audio_source;
+        std::optional<std::string> audio_device;
+        std::optional<unsigned int> audio_channels;
+        std::optional<unsigned int> audio_bitrate;
+        std::optional<unsigned int> audio_samplerate;
+        std::optional<int> audio_sync_us;
+        bool audio_auto_gain = false;
+        std::optional<double> audio_gain_db;
+};
+
+class Mp4RecordingController
+{
+public:
+        bool start(Mp4RecordingConfig const &config, CameraSettings const &settings,
+                   std::string const &preview_pipeline, std::string &error);
+        bool stop(std::string &error);
+        Mp4RecordingStatus status() const;
+
+private:
+        void recordingThread(Mp4RecordingConfig config, CameraSettings settings, std::string preview_pipeline,
+                             std::promise<bool> started);
+
+        mutable std::mutex mutex_;
+        std::thread thread_;
+        std::atomic<bool> stop_flag_{false};
+        std::shared_ptr<RPiCamEncoder> app_;
+        bool active_ = false;
+        Mp4RecordingConfig last_config_;
+        std::string filename_;
+        std::string last_error_;
+        std::optional<std::chrono::steady_clock::time_point> start_time_;
 };
 
 struct CameraModeInfo
@@ -117,6 +211,8 @@ public:
         bool stopSession(std::string &error_message);
 
 private:
+        double capFrameRate(double requested) const;
+
         struct CaptureResult
         {
                 bool success = false;
@@ -162,6 +258,7 @@ private:
         SessionState session_;
         CaptureSummary last_capture_;
         std::string last_camera_model_;
+        Mp4RecordingController mp4_controller_;
         HardwareInfo hardware_info_;
         std::string preview_pipeline_;
         std::string preview_client_pipeline_;
