@@ -91,7 +91,8 @@ Returns the current session state, camera settings, preview pipelines, and the
 summary of the latest capture (or `null` if nothing has been recorded yet). The
 payload now also contains a `hardware` block that mirrors `GET /hardware`
 described below, so most clients only need a single request to populate camera
-settings and available resolutions.
+settings and available resolutions. A `mjpeg_stream_enabled` flag advertises
+whether the legacy MJPEG endpoint is active (off by default).
 
 ### `GET /hardware`
 
@@ -208,13 +209,16 @@ Stops the active video recording. Returns HTTP 409 if nothing is running.
 ### `GET /preview`
 
 Returns the most recent preview frame as a JPEG (or HTTP 503 if no frame is
-available). Clients should not poll faster than the camera frame rate.
+available). Clients should not poll faster than the camera frame rate. This is
+left enabled for convenience even when the MJPEG stream is disabled.
 
 ### `GET /preview/stream`
 
-Streams an MJPEG feed suitable for browsers. Only one client is allowed at a
-time; additional clients receive HTTP 409. While streaming, `/preview` requests
-will return HTTP 503 because the preview buffer is busy.
+Streams an MJPEG feed suitable for browsers. Disabled by default; pass
+`--enable-mjpeg-stream` (or `--mjpeg-stream`) to the daemon to opt in. Only one
+client is allowed at a time; additional clients receive HTTP 409. While
+streaming, `/preview` requests will return HTTP 503 because the preview buffer
+is busy.
 
 ### Compatibility alias
 

@@ -23,8 +23,9 @@ remain valid:
 * ⚠️ The HTTP server ships without TLS/authentication or request throttling. Run
   it on trusted networks only, ideally behind a reverse proxy that enforces
   authentication and size limits.
-* ⚠️ MJPEG streaming (`/preview/stream`) supports a single client at a time; new
-  connections are rejected until the previous viewer disconnects.
+* ⚠️ MJPEG streaming (`/preview/stream`) is disabled by default and intended
+  only for debugging. Start with `--enable-mjpeg-stream` if you really need it
+  (single-client only; heavy on bandwidth/CPU).
 * ⚠️ CinemaDNG video mode remains **experimental** and is **not** considered
   working yet. The daemon writes every RAW frame to disk, expects you to manage
   clip directories manually, and may drop frames—treat it as a preview only.

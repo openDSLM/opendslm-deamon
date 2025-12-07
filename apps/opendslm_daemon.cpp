@@ -68,6 +68,7 @@ struct CommandLineOptions
         bool preview_enabled = true;
         bool preview_pipeline_explicit = false;
         bool preview_client_pipeline_explicit = false;
+        bool mjpeg_stream_enabled = false;
 };
 
 CommandLineOptions parseCommandLine(int argc, char *argv[])
@@ -141,6 +142,14 @@ CommandLineOptions parseCommandLine(int argc, char *argv[])
                         options.preview_pipeline.clear();
                         options.preview_pipeline_explicit = true;
                 }
+                else if (arg == "--enable-mjpeg-stream" || arg == "--mjpeg-stream")
+                {
+                        options.mjpeg_stream_enabled = true;
+                }
+                else if (arg == "--disable-mjpeg-stream" || arg == "--no-mjpeg-stream")
+                {
+                        options.mjpeg_stream_enabled = false;
+                }
                 else if (arg == "--help" || arg == "-h")
                 {
                         std::cout << "Usage: opendslm-daemon [--port <port>] [preview options]\n";
@@ -151,6 +160,8 @@ CommandLineOptions parseCommandLine(int argc, char *argv[])
                         std::cout << "  --preview-gstreamer-socket <path>     Change the shared-memory socket path (default: "
                                   << kDefaultShmSocket << ").\n";
                         std::cout << "  --no-preview-gstreamer                Disable the GStreamer preview backend." << std::endl;
+                        std::cout << "Legacy preview options:\n";
+                        std::cout << "  --enable-mjpeg-stream                 Opt in to the MJPEG HTTP stream at /preview/stream (default: disabled)." << std::endl;
                         std::cout << "When no custom pipeline is supplied the daemon publishes preview frames through shmsink\n"
                                      "and advertises a matching shmsrc client pipeline." << std::endl;
                         std::exit(0);
@@ -202,6 +213,7 @@ int main(int argc, char *argv[])
                 daemon.setPreviewPipeline(cli.preview_pipeline);
                 daemon.setPreviewClientPipeline(cli.preview_client_pipeline, cli.preview_client_pipeline_explicit);
                 daemon.setShmSocket(cli.shm_socket);
+                daemon.setMjpegStreamEnabled(cli.mjpeg_stream_enabled);
                 daemon.start(cli.port);
 
                 std::signal(SIGINT, signalHandler);
@@ -212,6 +224,8 @@ int main(int argc, char *argv[])
                         std::cout << "Preview pipeline: " << cli.preview_pipeline << std::endl;
                 if (!cli.preview_client_pipeline.empty())
                         std::cout << "Client preview pipeline: " << cli.preview_client_pipeline << std::endl;
+                if (cli.mjpeg_stream_enabled)
+                        std::cout << "MJPEG stream enabled at /preview/stream" << std::endl;
                 std::cout << "Press Ctrl+C to stop." << std::endl;
 
                 while (keep_running)

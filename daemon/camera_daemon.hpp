@@ -113,6 +113,8 @@ public:
         bool previewClientPipelineExplicit() const;
         void setShmSocket(const std::string &socket);
         std::string shmSocket() const;
+        void setMjpegStreamEnabled(bool enabled);
+        bool mjpegStreamEnabled() const;
         bool startSession(SessionMode mode, const std::string &video_path, std::string &error_message);
         bool stopSession(std::string &error_message);
 
@@ -167,6 +169,7 @@ private:
         std::string preview_client_pipeline_;
         bool preview_client_pipeline_explicit_ = false;
         std::string shm_socket_;
+        bool mjpeg_stream_enabled_ = false;
 
         // Background camera thread and control flags
         std::thread camera_thread_;

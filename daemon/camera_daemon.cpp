@@ -336,6 +336,18 @@ std::string CameraDaemon::shmSocket() const
         return shm_socket_;
 }
 
+void CameraDaemon::setMjpegStreamEnabled(bool enabled)
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        mjpeg_stream_enabled_ = enabled;
+}
+
+bool CameraDaemon::mjpegStreamEnabled() const
+{
+        std::lock_guard<std::mutex> lock(mutex_);
+        return mjpeg_stream_enabled_;
+}
+
 void CameraDaemon::start(uint16_t port)
 {
         probeHardwareInfo();
@@ -611,6 +623,7 @@ std::string CameraDaemon::buildStatusJson() const
              << "},\"settings\":" << buildSettingsJson(settings_, last_camera_model_)
              << ",\"preview_pipeline\":" << jsonString(preview_pipeline_)
              << ",\"preview_client_pipeline\":" << jsonString(preview_client_pipeline_)
+             << ",\"mjpeg_stream_enabled\":" << (mjpeg_stream_enabled_ ? "true" : "false")
              << ",\"last_capture\":";
         if (last_capture_.type.empty())
                 json << "null";
@@ -1656,18 +1669,30 @@ void CameraDaemon::registerRoutes()
                 return response;
         });
 
-        server_.addStreamHandler("GET", "/preview/stream", [this](int client_fd, HttpRequest const &)
+        if (mjpegStreamEnabled())
         {
-                PreviewSubscription preview_client(preview_clients_, preview_enabled_);
-                const char *hdr =
-                        "HTTP/1.1 200 OK\r\n"
-                        "Connection: close\r\n"
-                        "Cache-Control: no-cache, no-store, must-revalidate\r\n"
-                        "Pragma: no-cache\r\n"
-                        "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n";
-                ::send(client_fd, hdr, strlen(hdr), 0);
-                streamClientLoop(client_fd);
-        });
+                server_.addStreamHandler("GET", "/preview/stream", [this](int client_fd, HttpRequest const &)
+                {
+                        PreviewSubscription preview_client(preview_clients_, preview_enabled_);
+                        const char *hdr =
+                                "HTTP/1.1 200 OK\r\n"
+                                "Connection: close\r\n"
+                                "Cache-Control: no-cache, no-store, must-revalidate\r\n"
+                                "Pragma: no-cache\r\n"
+                                "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n";
+                        ::send(client_fd, hdr, strlen(hdr), 0);
+                        streamClientLoop(client_fd);
+                });
+        }
+        else
+        {
+                server_.addHandler("GET", "/preview/stream", [](HttpRequest const &) {
+                        HttpResponse response;
+                        response.status_code = 410;
+                        response.body = "{\"error\":\"MJPEG streaming disabled by default; start daemon with --enable-mjpeg-stream to opt in\"}";
+                        return response;
+                });
+        }
 }
 
 void CameraDaemon::startCameraLoop()
