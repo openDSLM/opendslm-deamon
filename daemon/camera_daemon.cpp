@@ -18,6 +18,9 @@
 #include <utility>
 #include <cmath>
 #include <cctype>
+#ifdef GSTREAMER_PRESENT
+#include <gstreamer-1.0/gst/gst.h>
+#endif
 #include <cstdlib>
 #include <sys/utsname.h>
 
@@ -336,6 +339,216 @@ std::string CameraDaemon::shmSocket() const
         return shm_socket_;
 }
 
+bool CameraDaemon::startGstRecorder(const std::string &file_path, int bitrate_kbps, double fps)
+{
+#ifndef GSTREAMER_PRESENT
+        (void)file_path;
+        (void)bitrate_kbps;
+        (void)fps;
+        return false;
+#else
+        std::lock_guard<std::mutex> record_lock(record_mutex_);
+        if (record_active_)
+                return true;
+
+        int width = preview_width_.load();
+        int height = preview_height_.load();
+        if (width <= 0 || height <= 0)
+        {
+                width = 1920;
+                height = 1080;
+        }
+        if (fps <= 0.0)
+                fps = preview_fps_.load();
+        if (fps <= 0.0)
+                fps = 30.0;
+
+        auto have_encoder = [](const char *name) {
+                GstElementFactory *factory = gst_element_factory_find(name);
+                if (!factory)
+                        return false;
+                gst_object_unref(factory);
+                return true;
+        };
+
+        enum class EncoderKind { V4L2_STATELESS, V4L2, OMX, OPENH264, X264 };
+        EncoderKind encoder = EncoderKind::X264;
+        std::string encoder_name = "x264enc";
+        if (have_encoder("v4l2slh264enc"))
+        {
+                encoder = EncoderKind::V4L2_STATELESS;
+                encoder_name = "v4l2slh264enc";
+        }
+        else if (have_encoder("v4l2h264enc"))
+        {
+                encoder = EncoderKind::V4L2;
+                encoder_name = "v4l2h264enc";
+        }
+        else if (have_encoder("omxh264enc"))
+        {
+                encoder = EncoderKind::OMX;
+                encoder_name = "omxh264enc";
+        }
+        else if (have_encoder("openh264enc"))
+        {
+                encoder = EncoderKind::OPENH264;
+                encoder_name = "openh264enc";
+        }
+
+        std::ostringstream pipeline;
+        LOG(1, "Starting recorder (" << encoder_name
+                                     << ") " << width << "x" << height
+                                     << " @" << std::setprecision(3) << fps
+                                     << "fps, bitrate=" << bitrate_kbps << "kbps");
+        pipeline << "shmsrc socket-path=\"" << shm_socket_ << "\" is-live=true do-timestamp=true "
+                 << "! queue max-size-buffers=8 leaky=downstream "
+                 << "! video/x-raw,format=RGBA,width=" << width << ",height=" << height;
+
+        long fps_scaled = std::lround(fps * 1000.0);
+        if (fps_scaled > 0)
+                pipeline << ",framerate=" << fps_scaled << "/1000";
+
+        pipeline << " ! videoconvert ";
+
+        int key_int = std::max(1, (int)std::lround(fps * 2));
+        if (encoder == EncoderKind::V4L2 || encoder == EncoderKind::V4L2_STATELESS)
+        {
+                long bitrate_bps = static_cast<long>(bitrate_kbps) * 1000L;
+                pipeline << "! video/x-raw,format=NV12 "
+                         << "! " << encoder_name << " qos=true "
+                         << "extra-controls=\"controls,repeat_sequence_header=1,"
+                            "h264_i_frame_period=" << key_int
+                         << ",video_bitrate=" << bitrate_bps << "\" ";
+        }
+        else if (encoder == EncoderKind::OMX)
+        {
+                long bitrate_bps = static_cast<long>(bitrate_kbps) * 1000L;
+                pipeline << "! video/x-raw,format=I420 "
+                         << "! omxh264enc target-bitrate=" << bitrate_bps << " ";
+        }
+        else if (encoder == EncoderKind::OPENH264)
+        {
+                long bitrate_bps = static_cast<long>(bitrate_kbps) * 1000L;
+                pipeline << "! video/x-raw,format=I420 "
+                         << "! openh264enc bitrate=" << bitrate_bps
+                         << " gop-size=" << key_int
+                         << " complexity=low ";
+        }
+        else
+        {
+                pipeline << "! video/x-raw,format=I420 "
+                         << "! x264enc tune=zerolatency speed-preset=ultrafast bitrate=" << bitrate_kbps
+                         << " key-int-max=" << key_int
+                         << " bframes=0 ref=1 byte-stream=false aud=true insert-vui=true ";
+        }
+
+        pipeline << "! h264parse config-interval=1 disable-passthrough=true "
+                 << "! queue max-size-buffers=4 leaky=downstream "
+                 << "! mp4mux faststart=true streamable=true fragment-duration=1000 "
+                 << "! queue "
+                 << "! filesink location=\"" << file_path << "\" async=false";
+
+        GError *error = nullptr;
+        GstElement *pipe = gst_parse_launch(pipeline.str().c_str(), &error);
+        if (!pipe || error)
+        {
+                if (error)
+                        LOG_ERROR("Failed to start recorder: " << error->message);
+                if (pipe)
+                        gst_object_unref(pipe);
+                return false;
+        }
+
+        GstBus *bus = gst_element_get_bus(pipe);
+        if (bus)
+        {
+                gst_bus_add_watch(bus, [](GstBus *, GstMessage *msg, gpointer user_data) -> gboolean {
+                        auto *self = static_cast<CameraDaemon *>(user_data);
+                        if (!self)
+                                return TRUE;
+
+                        auto mark_failed = [&](const char *err_text) {
+                                {
+                                        std::lock_guard<std::mutex> lock(self->record_mutex_);
+                                        self->record_active_ = false;
+                                }
+                                {
+                                        std::lock_guard<std::mutex> lock(self->capture_mutex_);
+                                        self->video_recording_ = false;
+                                        self->video_sequence_path_.clear();
+                                }
+                                {
+                                        std::lock_guard<std::mutex> lock(self->mutex_);
+                                        self->session_.active = false;
+                                        self->session_.mode = SessionMode::None;
+                                        if (err_text && !self->session_.last_error.size())
+                                                self->session_.last_error = err_text;
+                                }
+                        };
+
+                        switch (GST_MESSAGE_TYPE(msg))
+                        {
+                        case GST_MESSAGE_ERROR:
+                        {
+                                GError *err = nullptr;
+                                gchar *dbg = nullptr;
+                                gst_message_parse_error(msg, &err, &dbg);
+                                if (err)
+                                {
+                                        LOG_ERROR("Recorder error: " << err->message);
+                                        g_error_free(err);
+                                }
+                                if (dbg)
+                                        g_free(dbg);
+                                {
+                                        std::lock_guard<std::mutex> lock(self->record_mutex_);
+                                        self->record_active_ = false;
+                                }
+                                mark_failed(err ? err->message : "Recorder error");
+                                return FALSE;
+                        }
+                        case GST_MESSAGE_EOS:
+                        {
+                                mark_failed(nullptr);
+                                return FALSE;
+                        }
+                        default:
+                                break;
+                        }
+                        return TRUE;
+                }, this);
+                gst_object_unref(bus);
+                }
+
+        gst_element_set_state(pipe, GST_STATE_PLAYING);
+        record_pipeline_ = pipe;
+        record_active_ = true;
+        {
+                std::lock_guard<std::mutex> cap_lock(capture_mutex_);
+                session_.last_error.clear();
+        }
+        return true;
+#endif
+}
+
+void CameraDaemon::stopGstRecorder()
+{
+#ifdef GSTREAMER_PRESENT
+        std::lock_guard<std::mutex> lock(record_mutex_);
+        if (!record_active_)
+                return;
+        if (record_pipeline_)
+        {
+                gst_element_send_event(record_pipeline_, gst_event_new_eos());
+                gst_element_get_state(record_pipeline_, nullptr, nullptr, 3 * GST_SECOND); // give mux a moment to flush
+                gst_element_set_state(record_pipeline_, GST_STATE_NULL);
+                gst_object_unref(record_pipeline_);
+                record_pipeline_ = nullptr;
+        }
+        record_active_ = false;
+#endif
+}
+
 void CameraDaemon::setMjpegStreamEnabled(bool enabled)
 {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -427,6 +640,17 @@ bool CameraDaemon::updateSettings(JsonObject const &values, std::string &error_m
                         return false;
                 }
                 updated.auto_exposure = *boolean;
+        }
+
+        if (auto it = values.find("bitrate"); it != values.end())
+        {
+                auto number = it->second.asNumber();
+                if (!number || *number <= 0)
+                {
+                        error_message = "Invalid bitrate value";
+                        return false;
+                }
+                updated.video_bitrate = static_cast<int>(*number);
         }
 
         if (auto it = values.find("output_dir"); it != values.end())
@@ -557,6 +781,21 @@ bool CameraDaemon::startSession(SessionMode mode, const std::string &video_path,
                         video_recording_ = true;
                         video_sequence_path_ = target_path;
                 }
+
+                std::filesystem::path clip_dir(target_path);
+                std::string output_file = (clip_dir / "clip.mp4").string();
+                int bitrate_kbps = settings_.video_bitrate > 0 ? settings_.video_bitrate / 1000 : 35000;
+                double fps = settings_.fps > 0.0 ? settings_.fps : 30.0;
+
+                if (!startGstRecorder(output_file, bitrate_kbps, fps))
+                {
+                        std::lock_guard<std::mutex> lock(capture_mutex_);
+                        video_recording_ = false;
+                        video_sequence_path_.clear();
+                        error_message = "Failed to start GStreamer recorder";
+                        return false;
+                }
+
                 {
                         std::lock_guard<std::mutex> lock(mutex_);
                         session_.mode = SessionMode::Video;
@@ -566,7 +805,6 @@ bool CameraDaemon::startSession(SessionMode mode, const std::string &video_path,
                         last_capture_.frames.clear();
                         last_capture_.directory = target_path;
                 }
-                camera_reconfigure_.store(true);
                 return true;
         }
 
@@ -577,6 +815,7 @@ bool CameraDaemon::startSession(SessionMode mode, const std::string &video_path,
                         video_recording_ = false;
                         video_sequence_path_.clear();
                 }
+                stopGstRecorder();
                 {
                         std::lock_guard<std::mutex> lock(mutex_);
                         session_.active = false;
@@ -595,25 +834,34 @@ bool CameraDaemon::stopSession(std::string &error_message)
 {
         {
                 std::lock_guard<std::mutex> lock(capture_mutex_);
-                if (!video_recording_)
-                {
-                        error_message = "No active session";
-                        return false;
-                }
                 video_recording_ = false;
                 video_sequence_path_.clear();
         }
+        stopGstRecorder();
         {
                 std::lock_guard<std::mutex> lock(mutex_);
                 session_.active = false;
                 session_.mode = SessionMode::None;
                 session_.last_error.clear();
         }
+        error_message.clear();
         return true;
 }
 
 std::string CameraDaemon::buildStatusJson() const
 {
+        bool recording_active = false;
+        std::string recording_file;
+        {
+                std::lock_guard<std::mutex> lock(record_mutex_);
+                recording_active = record_active_;
+        }
+        {
+                std::lock_guard<std::mutex> lock(capture_mutex_);
+                if (!video_sequence_path_.empty())
+                        recording_file = (std::filesystem::path(video_sequence_path_) / "clip.mp4").string();
+        }
+
         std::lock_guard<std::mutex> lock(mutex_);
         std::ostringstream json;
         json << "{\"state\":{"
@@ -624,6 +872,10 @@ std::string CameraDaemon::buildStatusJson() const
              << ",\"preview_pipeline\":" << jsonString(preview_pipeline_)
              << ",\"preview_client_pipeline\":" << jsonString(preview_client_pipeline_)
              << ",\"mjpeg_stream_enabled\":" << (mjpeg_stream_enabled_ ? "true" : "false")
+             << ",\"recording\":{"
+             << "\"active\":" << (recording_active ? "true" : "false")
+             << ",\"filename\":" << jsonString(recording_file)
+             << "}"
              << ",\"last_capture\":";
         if (last_capture_.type.empty())
                 json << "null";
@@ -642,6 +894,7 @@ std::string CameraDaemon::buildSettingsJson(CameraSettings const &settings,
              << "\"fps\":" << settings.fps
              << ",\"shutter_us\":" << settings.shutter_us
              << ",\"analogue_gain\":" << settings.analogue_gain
+             << ",\"bitrate\":" << settings.video_bitrate
              << ",\"auto_exposure\":" << (settings.auto_exposure ? "true" : "false")
              << ",\"output_dir\":" << jsonString(settings.output_dir)
              << ",\"mode\":" << jsonString(settings.mode)
@@ -1304,6 +1557,14 @@ void CameraDaemon::applyDetectedMetadataLocked(HardwareInfo const &info)
 
 void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoOptions &options, bool request_raw)
 {
+        double target_fps = settings.fps > 0.0 ? settings.fps : DEFAULT_FRAMERATE;
+        if (settings.shutter_us > 0.0)
+        {
+                double max_fps_from_shutter = 1e6 / settings.shutter_us;
+                if (max_fps_from_shutter < target_fps)
+                        target_fps = max_fps_from_shutter;
+        }
+
         options.timeout.value = std::chrono::nanoseconds(0);
 #ifdef GSTREAMER_PRESENT
         options.nopreview = options.preview_gstreamer.empty();
@@ -1326,7 +1587,7 @@ void CameraDaemon::applySettingsToOptions(CameraSettings const &settings, VideoO
         options.denoise = "auto";
         options.no_raw = !request_raw;
         options.output = request_raw ? settings.output_dir : std::string();
-        options.framerate = settings.fps;
+        options.framerate = target_fps;
 
         if (!settings.mode.empty())
         {
@@ -1768,6 +2029,12 @@ void CameraDaemon::cameraLoop()
                         libcamera::Stream *vstream = app.VideoStream(&vinfo);
                         if (!vstream)
                                 throw std::runtime_error("Video stream unavailable for preview");
+                        preview_width_.store(static_cast<int>(vinfo.width));
+                        preview_height_.store(static_cast<int>(vinfo.height));
+                        double effective_fps = options->framerate.value_or(DEFAULT_FRAMERATE);
+                        if (effective_fps <= 0.0)
+                                effective_fps = DEFAULT_FRAMERATE;
+                        preview_fps_.store(effective_fps);
 
                         if (!previewClientPipelineExplicit())
                         {
@@ -1983,7 +2250,7 @@ void CameraDaemon::cameraLoop()
                                 bool need_output = false;
                                 {
                                         std::lock_guard<std::mutex> lock(capture_mutex_);
-                                        need_output = video_recording_ || still_pending_;
+                                        need_output = still_pending_;
                                         if (!need_output && active_output_)
                                                 active_output_.reset();
                                 }

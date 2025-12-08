@@ -13,6 +13,11 @@
 #include <thread>
 #include <vector>
 
+#ifdef GSTREAMER_PRESENT
+struct _GstElement;
+using GstElement = _GstElement;
+#endif
+
 #include "core/video_options.hpp"
 #include "daemon/json_utils.hpp"
 #include "daemon/simple_http.hpp"
@@ -38,6 +43,7 @@ struct CameraSettings
         double fps = 24.0;
         double shutter_us = 0.0;
         double analogue_gain = 1.0;
+        int video_bitrate = 35'000'000; // bits per second
         bool auto_exposure = true;
         std::string output_dir = "/ssd/RAW";
         std::string mode;
@@ -133,6 +139,8 @@ private:
         static std::string buildCaptureJson(CaptureSummary const &capture);
         std::string buildHardwareJson() const;
         std::string buildHardwareJsonLocked(HardwareInfo const &info) const;
+        bool startGstRecorder(const std::string &file_path, int bitrate_kbps, double fps);
+        void stopGstRecorder();
 
         CaptureResult runCineDngCapture(CameraSettings const &settings, bool single_shot,
                                         std::atomic<bool> *stop_flag);
@@ -176,6 +184,14 @@ private:
         std::atomic<bool> camera_stop_{false};
         std::atomic<bool> camera_reconfigure_{false};
         std::mutex camera_guard_;
+        mutable std::mutex record_mutex_;
+#ifdef GSTREAMER_PRESENT
+        GstElement *record_pipeline_ = nullptr;
+#endif
+        bool record_active_ = false;
+        std::atomic<int> preview_width_{0};
+        std::atomic<int> preview_height_{0};
+        std::atomic<double> preview_fps_{0.0};
 
         // Latest preview frame (JPEG)
         std::mutex preview_mutex_;
@@ -186,7 +202,7 @@ private:
         std::atomic<int> preview_clients_{0};
 
         // Capture state shared with camera loop
-        std::mutex capture_mutex_;
+        mutable std::mutex capture_mutex_;
         std::shared_ptr<DngOutput> active_output_;
         bool video_recording_ = false;
         bool still_pending_ = false;
